@@ -1,10 +1,14 @@
 package backend
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -13,13 +17,33 @@ import (
 	"github.com/pkg/errors"
 	"github.com/travis-ci/worker/config"
 	"github.com/travis-ci/worker/context"
+	"github.com/travis-ci/worker/image"
 	"github.com/travis-ci/worker/ssh"
+	api "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+	/*
+		appsv1 "k8s.io/api/apps/v1"
+		apiv1 "k8s.io/api/core/v1"
+		metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+		"k8s.io/client-go/kubernetes"
+		"k8s.io/client-go/tools/clientcmd"
+		"k8s.io/client-go/util/homedir"
+		"k8s.io/client-go/util/retry"
+	*/// Uncomment the following line to load the gcp plugin (only required to authenticate against GKE clusters).
+	// _ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 )
 
 func init() {
 	Register("kubernetes", "Kubernetes", map[string]string{
-		"LOG_OUTPUT": "kubernetes log output to write",
-		"RUN_SLEEP":  "kubernetes runtime sleep duration",
+		"REGISTRY_HOSTNAME": "Docker registry hostname",
+		"REGISTRY_EMAIL":    "Email address for docker registry",
+		"REGISTRY_LOGIN":    "Username for docker registry",
+		"REGISTRY_PASSWORD": "Password for docker registry",
+		"NAMESPACE":         "Kubernetes namespace to use for deploys",
+		"KUBE_CONFIG":       "Path to kubeconfig file",
+		"IMAGE_MAP":         "Map of which image to use for which language",
 	}, newKubernetesProvider)
 }
 
@@ -33,18 +57,36 @@ type kubernetesContainerTmp struct {
 
 var (
 	defaultKubernetesScriptLocation = "/home/jonhenrik/travis-in-kubernetes"
+	defaultKubeConfig               = filepath.Join(os.Getenv("HOME"), ".kube", "config")
+	defaultDockerCfgSecretName      = "travis-docker-registry"
+	defaultDockerRegistryHostName   = "index.docker.io"
+	defaultKubernetesNamespace      = "default"
 )
 
 /****** POC SECTION *******/
 
 type kubernetesProvider struct {
-	cfg            *config.ProviderConfig
-	sshDialer      ssh.Dialer
-	sshDialTimeout time.Duration
-	execCmd        []string
+	cfg                    *config.ProviderConfig
+	clientSet              *kubernetes.Clientset
+	sshDialer              ssh.Dialer
+	sshDialTimeout         time.Duration
+	execCmd                []string
+	dockerRegistryHost     string
+	dockerRegistryUser     string
+	dockerRegistryPassword string
+	kubernetesNamespace    string
 }
 
 func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
+
+	config, err := clientcmd.BuildConfigFromFlags("", defaultKubeConfig)
+	if err != nil {
+		return nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
 
 	sshDialer, err := ssh.NewDialerWithPassword("travis")
 
@@ -65,13 +107,66 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		execCmd = strings.Split(cfg.Get("EXEC_CMD"), " ")
 	}
 
+	dockerRegistryHost := defaultDockerRegistryHostName
+	if cfg.IsSet("REGISTRY_HOSTNAME") {
+		dockerRegistryHost = cfg.Get("REGISTRY_HOSTNAME")
+	}
+
+	dockerRegistryUser := ""
+	dockerRegistryPassword := ""
+	if cfg.IsSet("REGISTRY_LOGIN") && cfg.IsSet("REGISTRY_PASSWORD") {
+		if len(strings.TrimSpace(cfg.Get("REGISTRY_LOGIN"))) != 0 &&
+			len(strings.TrimSpace(cfg.Get("REGISTRY_PASSWORD"))) != 0 {
+
+			dockerRegistryUser = cfg.Get("REGISTRY_LOGIN")
+			dockerRegistryPassword = cfg.Get("REGISTRY_PASSWORD")
+		}
+	}
+
+	kubernetesNamespace := defaultKubernetesNamespace
+
+	if cfg.IsSet("NAMESPACE") {
+		kubernetesNamespace = cfg.Get("NAMESPACE")
+	}
+
 	return &kubernetesProvider{
-		cfg:            cfg,
-		sshDialTimeout: sshDialTimeout,
-		sshDialer:      sshDialer,
-		execCmd:        execCmd,
+		cfg:                    cfg,
+		clientSet:              clientset,
+		sshDialTimeout:         sshDialTimeout,
+		sshDialer:              sshDialer,
+		execCmd:                execCmd,
+		dockerRegistryHost:     dockerRegistryHost,
+		dockerRegistryPassword: dockerRegistryPassword,
+		dockerRegistryUser:     dockerRegistryUser,
+		kubernetesNamespace:    kubernetesNamespace,
 	}, nil
 
+}
+
+func (p *kubernetesProvider) imageSelect(ctx gocontext.Context, startAttributes *StartAttributes) (string, error) {
+	jobID, _ := context.JobIDFromContext(ctx)
+	repo, _ := context.RepositoryFromContext(ctx)
+
+	imageName, err := p.imageSelector.Select(&image.Params{
+		Infra:    p.imageSelectorInfra,
+		Language: startAttributes.Language,
+		OsxImage: startAttributes.OsxImage,
+		Dist:     startAttributes.Dist,
+		Group:    startAttributes.Group,
+		OS:       startAttributes.OS,
+		JobID:    jobID,
+		Repo:     repo,
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	if imageName == "default" {
+		imageName = p.defaultImage
+	}
+
+	return imageName, nil
 }
 
 func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *StartAttributes) (Instance, error) {
@@ -79,7 +174,6 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		dur time.Duration
 		err error
 	)
-
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
 	hostName := hostnameFromContext(ctx)
 	out, err := exec.Command(fmt.Sprintf("%s/step_start.sh", defaultKubernetesScriptLocation), hostName).Output()
@@ -101,7 +195,73 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 	}, nil
 }
 
-func (p *kubernetesProvider) Setup(ctx gocontext.Context) error { return nil }
+func (p *kubernetesProvider) Setup(ctx gocontext.Context) error {
+
+	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
+	if p.dockerRegistryUser != "" && p.dockerRegistryPassword != "" {
+		secret, err := createDockerRegistrySecret(p.kubernetesNamespace, p.dockerRegistryHost, p.dockerRegistryUser, p.dockerRegistryPassword, "")
+
+		if err != nil {
+			logger.WithField("err", err).Error("Unable to manage auth for docker registry")
+			return err
+		}
+		return p.upsertSecret(secret)
+	}
+	return nil
+}
+
+func (p *kubernetesProvider) upsertSecret(secret *api.Secret) error {
+	existingSecret, err := p.clientSet.Core().Secrets(p.kubernetesNamespace).Get(defaultDockerCfgSecretName, metav1.GetOptions{})
+
+	if err != nil {
+		_, err = p.clientSet.Core().Secrets(p.kubernetesNamespace).Create(secret)
+		return err
+	}
+
+	if !reflect.DeepEqual(existingSecret.Data, secret.Data) {
+		_, err = p.clientSet.Core().Secrets(p.kubernetesNamespace).Update(secret)
+	} else {
+
+	}
+
+	return err
+}
+
+func createDockerRegistrySecret(namespace, hostname, username, password, email string) (*api.Secret, error) {
+
+	secret := newSecret(api.SecretTypeDockercfg, namespace, defaultDockerCfgSecretName)
+
+	dockerCfg := map[string]map[string]string{
+		hostname: {
+			"email":    email,
+			"username": username,
+			"password": password,
+			"auth":     base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", username, password))),
+		},
+	}
+
+	dockerCfgContent, err := json.Marshal(dockerCfg)
+
+	if err != nil {
+		return nil, err
+	}
+
+	secret.Data = map[string][]byte{
+		api.DockerConfigKey: dockerCfgContent,
+	}
+
+	return secret, nil
+}
+
+func newSecret(secretType api.SecretType, namespace, name string) *api.Secret {
+	return &api.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+		},
+		Type: secretType,
+	}
+}
 
 type kubernetesInstance struct {
 	provider        *kubernetesProvider
