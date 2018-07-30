@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,9 +20,11 @@ import (
 	"github.com/travis-ci/worker/context"
 	"github.com/travis-ci/worker/image"
 	"github.com/travis-ci/worker/ssh"
-	api "k8s.io/api/core/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/typed/apps/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	/*
 		appsv1 "k8s.io/api/apps/v1"
@@ -43,7 +46,6 @@ func init() {
 		"REGISTRY_PASSWORD": "Password for docker registry",
 		"NAMESPACE":         "Kubernetes namespace to use for deploys",
 		"KUBE_CONFIG":       "Path to kubeconfig file",
-		"IMAGE_MAP":         "Map of which image to use for which language",
 	}, newKubernetesProvider)
 }
 
@@ -56,25 +58,28 @@ type kubernetesContainerTmp struct {
 }
 
 var (
-	defaultKubernetesScriptLocation = "/home/jonhenrik/travis-in-kubernetes"
-	defaultKubeConfig               = filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	defaultDockerCfgSecretName      = "travis-docker-registry"
-	defaultDockerRegistryHostName   = "index.docker.io"
-	defaultKubernetesNamespace      = "default"
+	defaultKubernetesScriptLocation    = "/home/jonhenrik/travis-in-kubernetes"
+	defaultKubeConfig                  = filepath.Join(os.Getenv("HOME"), ".kube", "config")
+	defaultDockerCfgSecretName         = "travis-docker-registry"
+	defaultDockerRegistryHostName      = "index.docker.io"
+	defaultKubernetesNamespace         = "default"
+	defaultKubernetesImageSelectorType = "env"
 )
 
 /****** POC SECTION *******/
 
 type kubernetesProvider struct {
-	cfg                    *config.ProviderConfig
-	clientSet              *kubernetes.Clientset
-	sshDialer              ssh.Dialer
-	sshDialTimeout         time.Duration
-	execCmd                []string
-	dockerRegistryHost     string
-	dockerRegistryUser     string
-	dockerRegistryPassword string
-	kubernetesNamespace    string
+	cfg                         *config.ProviderConfig
+	clientSet                   *kubernetes.Clientset
+	sshDialer                   ssh.Dialer
+	sshDialTimeout              time.Duration
+	execCmd                     []string
+	dockerRegistryHost          string
+	dockerRegistryUser          string
+	dockerRegistryPassword      string
+	kubernetesNamespace         string
+	imageSelector               image.Selector
+	kubernetesDeploymentsClient v1.DeploymentInterface
 }
 
 func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
@@ -83,9 +88,11 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	clientset, err := kubernetes.NewForConfig(config)
+
+	clientSet, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, err
+
 	}
 
 	sshDialer, err := ssh.NewDialerWithPassword("travis")
@@ -129,44 +136,51 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		kubernetesNamespace = cfg.Get("NAMESPACE")
 	}
 
+	imageSelectorType := defaultKubernetesImageSelectorType
+	if cfg.IsSet("IMAGE_SELECTOR_TYPE") {
+		imageSelectorType = cfg.Get("IMAGE_SELECTOR_TYPE")
+	}
+
+	if imageSelectorType != "env" && imageSelectorType != "api" {
+		return nil, fmt.Errorf("invalid image selector type %q", imageSelectorType)
+	}
+
+	imageSelector, err := buildKubernetesImageSelector(imageSelectorType, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	kubernetesDeploymentsClient := clientSet.AppsV1().Deployments(kubernetesNamespace)
+
 	return &kubernetesProvider{
-		cfg:                    cfg,
-		clientSet:              clientset,
-		sshDialTimeout:         sshDialTimeout,
-		sshDialer:              sshDialer,
-		execCmd:                execCmd,
-		dockerRegistryHost:     dockerRegistryHost,
-		dockerRegistryPassword: dockerRegistryPassword,
-		dockerRegistryUser:     dockerRegistryUser,
-		kubernetesNamespace:    kubernetesNamespace,
+		cfg:                         cfg,
+		clientSet:                   clientSet,
+		sshDialTimeout:              sshDialTimeout,
+		sshDialer:                   sshDialer,
+		execCmd:                     execCmd,
+		dockerRegistryHost:          dockerRegistryHost,
+		dockerRegistryPassword:      dockerRegistryPassword,
+		dockerRegistryUser:          dockerRegistryUser,
+		kubernetesNamespace:         kubernetesNamespace,
+		imageSelector:               imageSelector,
+		kubernetesDeploymentsClient: kubernetesDeploymentsClient,
 	}, nil
 
 }
 
-func (p *kubernetesProvider) imageSelect(ctx gocontext.Context, startAttributes *StartAttributes) (string, error) {
-	jobID, _ := context.JobIDFromContext(ctx)
-	repo, _ := context.RepositoryFromContext(ctx)
-
-	imageName, err := p.imageSelector.Select(&image.Params{
-		Infra:    p.imageSelectorInfra,
-		Language: startAttributes.Language,
-		OsxImage: startAttributes.OsxImage,
-		Dist:     startAttributes.Dist,
-		Group:    startAttributes.Group,
-		OS:       startAttributes.OS,
-		JobID:    jobID,
-		Repo:     repo,
-	})
-
-	if err != nil {
-		return "", err
+func buildKubernetesImageSelector(selectorType string, cfg *config.ProviderConfig) (image.Selector, error) {
+	switch selectorType {
+	case "env":
+		return image.NewEnvSelector(cfg)
+	case "api":
+		baseURL, err := url.Parse(cfg.Get("IMAGE_SELECTOR_URL"))
+		if err != nil {
+			return nil, err
+		}
+		return image.NewAPISelector(baseURL), nil
+	default:
+		return nil, fmt.Errorf("invalid image selector type %q", selectorType)
 	}
-
-	if imageName == "default" {
-		imageName = p.defaultImage
-	}
-
-	return imageName, nil
 }
 
 func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *StartAttributes) (Instance, error) {
@@ -174,13 +188,78 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		dur time.Duration
 		err error
 	)
+
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
+
+	selectedImageID, err := p.imageSelector.Select(&image.Params{
+		Language: startAttributes.Language,
+		Infra:    "kubernetes",
+	})
+
+	if err != nil {
+		logger.WithField("err", err).Error("couldn't select image")
+		return nil, err
+	}
+
+	fmt.Printf("Image name is: %s\n", selectedImageID)
+
+	replicas := int32(1)
+	hostname := hostnameFromContext(ctx)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: hostname,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": "travis-worker",
+					"job": hostname,
+				},
+			},
+			Template: apiv1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": "travis-worker",
+						"job": hostname,
+					},
+				},
+				Spec: apiv1.PodSpec{
+					Containers: []apiv1.Container{
+						{
+							Name:  fmt.Sprintf("%s-kubernetes-api", hostnameFromContext(ctx)),
+							Image: selectedImageID,
+							Ports: []apiv1.ContainerPort{
+								{
+									Name:          "ssh",
+									Protocol:      apiv1.ProtocolTCP,
+									ContainerPort: 22,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	fmt.Println(deployment)
+
+	fmt.Println("Creating deployment...")
+	result, err := p.kubernetesDeploymentsClient.Create(deployment)
+
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("Created deployment %q.\n", result.GetObjectMeta().GetName())
+
 	hostName := hostnameFromContext(ctx)
 	out, err := exec.Command(fmt.Sprintf("%s/step_start.sh", defaultKubernetesScriptLocation), hostName).Output()
 
 	if err != nil {
 		logger.WithField("err", err).Error("couldn't run script ")
 	}
+
 	var container kubernetesContainerTmp
 
 	err = json.Unmarshal(out, &container)
@@ -207,10 +286,11 @@ func (p *kubernetesProvider) Setup(ctx gocontext.Context) error {
 		}
 		return p.upsertSecret(secret)
 	}
+
 	return nil
 }
 
-func (p *kubernetesProvider) upsertSecret(secret *api.Secret) error {
+func (p *kubernetesProvider) upsertSecret(secret *apiv1.Secret) error {
 	existingSecret, err := p.clientSet.Core().Secrets(p.kubernetesNamespace).Get(defaultDockerCfgSecretName, metav1.GetOptions{})
 
 	if err != nil {
@@ -227,9 +307,9 @@ func (p *kubernetesProvider) upsertSecret(secret *api.Secret) error {
 	return err
 }
 
-func createDockerRegistrySecret(namespace, hostname, username, password, email string) (*api.Secret, error) {
+func createDockerRegistrySecret(namespace, hostname, username, password, email string) (*apiv1.Secret, error) {
 
-	secret := newSecret(api.SecretTypeDockercfg, namespace, defaultDockerCfgSecretName)
+	secret := newSecret(apiv1.SecretTypeDockercfg, namespace, defaultDockerCfgSecretName)
 
 	dockerCfg := map[string]map[string]string{
 		hostname: {
@@ -247,14 +327,14 @@ func createDockerRegistrySecret(namespace, hostname, username, password, email s
 	}
 
 	secret.Data = map[string][]byte{
-		api.DockerConfigKey: dockerCfgContent,
+		apiv1.DockerConfigKey: dockerCfgContent,
 	}
 
 	return secret, nil
 }
 
-func newSecret(secretType api.SecretType, namespace, name string) *api.Secret {
-	return &api.Secret{
+func newSecret(secretType apiv1.SecretType, namespace, name string) *apiv1.Secret {
+	return &apiv1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
 			Name:      name,
