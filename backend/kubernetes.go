@@ -20,11 +20,10 @@ import (
 	"github.com/travis-ci/worker/context"
 	"github.com/travis-ci/worker/image"
 	"github.com/travis-ci/worker/ssh"
-	appsv1 "k8s.io/api/apps/v1"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/typed/apps/v1"
+	scheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	/*
 		appsv1 "k8s.io/api/apps/v1"
@@ -69,17 +68,16 @@ var (
 /****** POC SECTION *******/
 
 type kubernetesProvider struct {
-	cfg                         *config.ProviderConfig
-	clientSet                   *kubernetes.Clientset
-	sshDialer                   ssh.Dialer
-	sshDialTimeout              time.Duration
-	execCmd                     []string
-	dockerRegistryHost          string
-	dockerRegistryUser          string
-	dockerRegistryPassword      string
-	kubernetesNamespace         string
-	imageSelector               image.Selector
-	kubernetesDeploymentsClient v1.DeploymentInterface
+	cfg                    *config.ProviderConfig
+	clientSet              *kubernetes.Clientset
+	sshDialer              ssh.Dialer
+	sshDialTimeout         time.Duration
+	execCmd                []string
+	dockerRegistryHost     string
+	dockerRegistryUser     string
+	dockerRegistryPassword string
+	kubernetesNamespace    string
+	imageSelector          image.Selector
 }
 
 func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
@@ -150,20 +148,17 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		return nil, err
 	}
 
-	kubernetesDeploymentsClient := clientSet.AppsV1().Deployments(kubernetesNamespace)
-
 	return &kubernetesProvider{
-		cfg:                         cfg,
-		clientSet:                   clientSet,
-		sshDialTimeout:              sshDialTimeout,
-		sshDialer:                   sshDialer,
-		execCmd:                     execCmd,
-		dockerRegistryHost:          dockerRegistryHost,
-		dockerRegistryPassword:      dockerRegistryPassword,
-		dockerRegistryUser:          dockerRegistryUser,
-		kubernetesNamespace:         kubernetesNamespace,
-		imageSelector:               imageSelector,
-		kubernetesDeploymentsClient: kubernetesDeploymentsClient,
+		cfg:                    cfg,
+		clientSet:              clientSet,
+		sshDialTimeout:         sshDialTimeout,
+		sshDialer:              sshDialer,
+		execCmd:                execCmd,
+		dockerRegistryHost:     dockerRegistryHost,
+		dockerRegistryPassword: dockerRegistryPassword,
+		dockerRegistryUser:     dockerRegistryUser,
+		kubernetesNamespace:    kubernetesNamespace,
+		imageSelector:          imageSelector,
 	}, nil
 
 }
@@ -203,57 +198,38 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 
 	fmt.Printf("Image name is: %s\n", selectedImageID)
 
-	replicas := int32(1)
-	hostname := hostnameFromContext(ctx)
-	deployment := &appsv1.Deployment{
+	hostName := hostnameFromContext(ctx)
+
+	podSpec := &apiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: hostname,
+			Name: fmt.Sprintf("%s-kube-api", hostName),
 		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app": "travis-worker",
-					"job": hostname,
-				},
-			},
-			Template: apiv1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app": "travis-worker",
-						"job": hostname,
-					},
-				},
-				Spec: apiv1.PodSpec{
-					Containers: []apiv1.Container{
+		Spec: apiv1.PodSpec{
+			Containers: []apiv1.Container{
+				{
+					Name:  fmt.Sprintf("%s-kube-api", hostName),
+					Image: selectedImageID,
+					Ports: []apiv1.ContainerPort{
 						{
-							Name:  fmt.Sprintf("%s-kubernetes-api", hostnameFromContext(ctx)),
-							Image: selectedImageID,
-							Ports: []apiv1.ContainerPort{
-								{
-									Name:          "ssh",
-									Protocol:      apiv1.ProtocolTCP,
-									ContainerPort: 22,
-								},
-							},
+							Name:          "ssh",
+							Protocol:      apiv1.ProtocolTCP,
+							ContainerPort: 22,
 						},
 					},
+					Command: []string{"/sbin/init"},
 				},
 			},
 		},
 	}
-	fmt.Println(deployment)
 
-	fmt.Println("Creating deployment...")
-	result, err := p.kubernetesDeploymentsClient.Create(deployment)
+	pod, err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Create(podSpec)
 
 	if err != nil {
 		return nil, err
 	}
 
-	fmt.Printf("Created deployment %q.\n", result.GetObjectMeta().GetName())
+	fmt.Printf("Created deployment %q.\n", pod.GetObjectMeta().GetName())
 
-	hostName := hostnameFromContext(ctx)
 	out, err := exec.Command(fmt.Sprintf("%s/step_start.sh", defaultKubernetesScriptLocation), hostName).Output()
 
 	if err != nil {
@@ -270,8 +246,62 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 	return &kubernetesInstance{
 		provider:        p,
 		startupDuration: dur,
+		pod:             pod,
 		container:       &container,
 	}, nil
+}
+
+func (i *kubernetesInstance) uploadScriptNative(ctx gocontext.Context, script []byte) error {
+	/*
+		reader, writer := io.Pipe()
+
+		tw := tar.NewWriter(writer)
+
+		err := tw.WriteHeader(&tar.Header{
+			Name: "/home/travis/build.sh",
+			Mode: 0755,
+			Size: int64(len(script)),
+		})
+
+		if err != nil {
+			return err
+		}
+
+		_, err = tw.Write(script)
+		if err != nil {
+			return err
+		}
+		err = tw.Close()
+		if err != nil {
+			return err
+		}
+
+		//cmdArr := []string{"tar", "xf", "-"}
+		/*
+			destDir := path.Dir(dest.File)
+			if len(destDir) > 0 {
+				cmdArr = append(cmdArr, "-C", destDir)
+			}
+	*/
+
+	//https://github.com/AOEpeople/kube-container-exec/blob/master/main.go
+	req := i.provider.clientSet.CoreV1().
+		RESTClient().Post().Resource("pods").Name(i.pod.Name).
+		Namespace(i.provider.kubernetesNamespace).SubResource("exec").
+		Param("container", i.pod.Name)
+
+	fmt.Println(req)
+	req.VersionedParams(&apiv1.PodExecOptions{
+		Stdin:     true,
+		Command:   []string{"tar", "xf", "-"},
+		Container: i.pod.Name,
+	}, scheme.ParameterCodec)
+
+	//fmt.Println(reader)
+
+	fmt.Println(req)
+
+	return nil
 }
 
 func (p *kubernetesProvider) Setup(ctx gocontext.Context) error {
@@ -345,12 +375,15 @@ func newSecret(secretType apiv1.SecretType, namespace, name string) *apiv1.Secre
 
 type kubernetesInstance struct {
 	provider        *kubernetesProvider
+	pod             *apiv1.Pod
 	container       *kubernetesContainerTmp
 	startupDuration time.Duration
 }
 
 func (i *kubernetesInstance) UploadScript(ctx gocontext.Context, script []byte) error {
+	i.uploadScriptNative(ctx, script)
 	return i.uploadScriptSCP(ctx, script)
+
 }
 
 func (i *kubernetesInstance) uploadScriptSCP(ctx gocontext.Context, script []byte) error {
@@ -414,3 +447,14 @@ func (i *kubernetesInstance) ImageName() string {
 func (i *kubernetesInstance) StartupDuration() time.Duration {
 	return i.startupDuration
 }
+
+/*
+func getAvailablePort(
+	for {
+    conn, err := net.DialTimeout("tcp", net.JoinHostPort("", port), timeout)
+    if conn != nil {
+        conn.Close()
+        break
+    }
+})
+*/
