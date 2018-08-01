@@ -1,10 +1,12 @@
 package backend
 
 import (
+	"archive/tar"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -23,8 +25,9 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	scheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
 	/*
 		appsv1 "k8s.io/api/apps/v1"
 		apiv1 "k8s.io/api/core/v1"
@@ -70,6 +73,7 @@ var (
 type kubernetesProvider struct {
 	cfg                    *config.ProviderConfig
 	clientSet              *kubernetes.Clientset
+	restclientConfig       *rest.Config
 	sshDialer              ssh.Dialer
 	sshDialTimeout         time.Duration
 	execCmd                []string
@@ -151,6 +155,7 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 	return &kubernetesProvider{
 		cfg:                    cfg,
 		clientSet:              clientSet,
+		restclientConfig:       config,
 		sshDialTimeout:         sshDialTimeout,
 		sshDialer:              sshDialer,
 		execCmd:                execCmd,
@@ -252,56 +257,71 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 }
 
 func (i *kubernetesInstance) uploadScriptNative(ctx gocontext.Context, script []byte) error {
-	/*
-		reader, writer := io.Pipe()
 
-		tw := tar.NewWriter(writer)
+	reader, writer := io.Pipe()
+	defer reader.Close()
 
+	tw := tar.NewWriter(writer)
+
+	go func() error {
+		defer writer.Close()
+		defer tw.Close()
 		err := tw.WriteHeader(&tar.Header{
 			Name: "/home/travis/build.sh",
 			Mode: 0755,
 			Size: int64(len(script)),
 		})
-
 		if err != nil {
 			return err
 		}
 
 		_, err = tw.Write(script)
-		if err != nil {
-			return err
-		}
-		err = tw.Close()
-		if err != nil {
-			return err
-		}
+		return err
+	}()
 
-		//cmdArr := []string{"tar", "xf", "-"}
-		/*
-			destDir := path.Dir(dest.File)
-			if len(destDir) > 0 {
-				cmdArr = append(cmdArr, "-C", destDir)
-			}
+	//cmdArr := []string{"tar", "xf", "-"}
+	/*
+		destDir := path.Dir(dest.File)
+		if len(destDir) > 0 {
+			cmdArr = append(cmdArr, "-C", destDir)
+		}
 	*/
-
 	//https://github.com/AOEpeople/kube-container-exec/blob/master/main.go
-	req := i.provider.clientSet.CoreV1().
-		RESTClient().Post().Resource("pods").Name(i.pod.Name).
-		Namespace(i.provider.kubernetesNamespace).SubResource("exec").
-		Param("container", i.pod.Name)
 
-	fmt.Println(req)
-	req.VersionedParams(&apiv1.PodExecOptions{
-		Stdin:     true,
-		Command:   []string{"tar", "xf", "-"},
-		Container: i.pod.Name,
-	}, scheme.ParameterCodec)
+	restClient := i.provider.clientSet.CoreV1().RESTClient()
+	commands := []string{"tar", "xf", "-"}
 
-	//fmt.Println(reader)
+	req := restClient.Post().
+		Namespace(i.provider.kubernetesNamespace).
+		Resource("pods").
+		Name(i.pod.Name).
+		SubResource("exec").
+		Param("container", i.pod.Name).
+		Param("stdin", "true").
+		Param("stdout", "true").
+		Param("stderr", "true")
 
-	fmt.Println(req)
+	for _, command := range commands {
+		req.Param("command", command)
+	}
 
-	return nil
+	executor, err := remotecommand.NewSPDYExecutor(i.provider.restclientConfig, http.MethodPost, req.URL())
+	if err != nil {
+		return err
+	}
+
+	os.Stdout.Sync()
+	os.Stderr.Sync()
+
+	err = executor.Stream(remotecommand.StreamOptions{
+		Stdin:             reader,
+		Stdout:            os.Stdout,
+		Stderr:            os.Stderr,
+		Tty:               false,
+		TerminalSizeQueue: nil,
+	})
+
+	return err
 }
 
 func (p *kubernetesProvider) Setup(ctx gocontext.Context) error {
@@ -433,6 +453,13 @@ func (i *kubernetesInstance) Stop(ctx gocontext.Context) error {
 	if err != nil {
 		logger.WithField("err", err).Error("couldn't run script ")
 	}
+
+	deletePolicy := metav1.DeletePropagationForeground
+
+	err = i.provider.clientSet.CoreV1().Pods(i.provider.kubernetesNamespace).Delete(i.pod.Name, &metav1.DeleteOptions{
+		PropagationPolicy: &deletePolicy,
+	})
+
 	return err
 }
 
