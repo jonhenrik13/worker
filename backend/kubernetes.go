@@ -252,6 +252,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		provider:        p,
 		startupDuration: dur,
 		pod:             pod,
+		imageName:       selectedImageID,
 		container:       &container,
 	}, nil
 }
@@ -266,10 +267,16 @@ func (i *kubernetesInstance) uploadScriptNative(ctx gocontext.Context, script []
 	go func() error {
 		defer writer.Close()
 		defer tw.Close()
+
+		now := time.Now()
+
 		err := tw.WriteHeader(&tar.Header{
-			Name: "/home/travis/build.sh",
-			Mode: 0755,
-			Size: int64(len(script)),
+			Name:       "/home/travis/build.sh",
+			Mode:       0755,
+			Size:       int64(len(script)),
+			AccessTime: now,
+			ModTime:    now,
+			ChangeTime: now,
 		})
 		if err != nil {
 			return err
@@ -396,6 +403,7 @@ func newSecret(secretType apiv1.SecretType, namespace, name string) *apiv1.Secre
 type kubernetesInstance struct {
 	provider        *kubernetesProvider
 	pod             *apiv1.Pod
+	imageName       string
 	container       *kubernetesContainerTmp
 	startupDuration time.Duration
 }
@@ -468,7 +476,7 @@ func (i *kubernetesInstance) ID() string {
 }
 
 func (i *kubernetesInstance) ImageName() string {
-	return "kubernetes"
+	return i.imageName
 }
 
 func (i *kubernetesInstance) StartupDuration() time.Duration {
