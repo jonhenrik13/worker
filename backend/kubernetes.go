@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -25,6 +24,7 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	scheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
@@ -207,12 +207,12 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 
 	podSpec := &apiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: fmt.Sprintf("%s-kube-api", hostName),
+			Name: fmt.Sprintf("%s", hostName),
 		},
 		Spec: apiv1.PodSpec{
 			Containers: []apiv1.Container{
 				{
-					Name:  fmt.Sprintf("%s-kube-api", hostName),
+					Name:  fmt.Sprintf("%s", hostName),
 					Image: selectedImageID,
 					Ports: []apiv1.ContainerPort{
 						{
@@ -233,32 +233,66 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		return nil, err
 	}
 
-	fmt.Printf("Created deployment %q.\n", pod.GetObjectMeta().GetName())
+	/*
+		fmt.Printf("Created deployment %q.\n", pod.GetObjectMeta().GetName())
 
-	out, err := exec.Command(fmt.Sprintf("%s/step_start.sh", defaultKubernetesScriptLocation), hostName).Output()
+		out, err := exec.Command(fmt.Sprintf("%s/step_start.sh", defaultKubernetesScriptLocation), hostName).Output()
 
-	if err != nil {
-		logger.WithField("err", err).Error("couldn't run script ")
-	}
+		if err != nil {
+			logger.WithField("err", err).Error("couldn't run script ")
+		}
 
-	var container kubernetesContainerTmp
+		var container kubernetesContainerTmp
 
-	err = json.Unmarshal(out, &container)
-	if err != nil {
-		logger.WithField("err", err).Error("unable to unmarshal output from script")
-	}
-
+		err = json.Unmarshal(out, &container)
+		if err != nil {
+			logger.WithField("err", err).Error("unable to unmarshal output from script")
+		}
+	*/
 	return &kubernetesInstance{
 		provider:        p,
 		startupDuration: dur,
 		pod:             pod,
 		imageName:       selectedImageID,
-		container:       &container,
+		//container:       &container,
 	}, nil
 }
 
-func (i *kubernetesInstance) uploadScriptNative(ctx gocontext.Context, script []byte) error {
+func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, stderr io.Writer) error {
 
+	restClient := i.provider.clientSet.CoreV1().RESTClient()
+
+	req := restClient.Post().
+		Namespace(i.provider.kubernetesNamespace).
+		Resource("pods").
+		Name(i.pod.Name).
+		SubResource("exec")
+
+	req.VersionedParams(&apiv1.PodExecOptions{
+		Stdin:     stdin != nil,
+		Container: i.pod.Name,
+		Stdout:    stdout != nil,
+		Stderr:    stderr != nil,
+		Command:   command,
+	}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(i.provider.restclientConfig, http.MethodPost, req.URL())
+	if err != nil {
+		return err
+	}
+
+	err = executor.Stream(remotecommand.StreamOptions{
+		Stdin:             stdin,
+		Stdout:            stdout,
+		Stderr:            stderr,
+		Tty:               false,
+		TerminalSizeQueue: nil,
+	})
+
+	return err
+}
+
+func (i *kubernetesInstance) uploadScriptNative(ctx gocontext.Context, script []byte) error {
 	reader, writer := io.Pipe()
 	defer reader.Close()
 
@@ -286,49 +320,8 @@ func (i *kubernetesInstance) uploadScriptNative(ctx gocontext.Context, script []
 		return err
 	}()
 
-	//cmdArr := []string{"tar", "xf", "-"}
-	/*
-		destDir := path.Dir(dest.File)
-		if len(destDir) > 0 {
-			cmdArr = append(cmdArr, "-C", destDir)
-		}
-	*/
-	//https://github.com/AOEpeople/kube-container-exec/blob/master/main.go
-
-	restClient := i.provider.clientSet.CoreV1().RESTClient()
-	commands := []string{"tar", "xf", "-"}
-
-	req := restClient.Post().
-		Namespace(i.provider.kubernetesNamespace).
-		Resource("pods").
-		Name(i.pod.Name).
-		SubResource("exec").
-		Param("container", i.pod.Name).
-		Param("stdin", "true").
-		Param("stdout", "true").
-		Param("stderr", "true")
-
-	for _, command := range commands {
-		req.Param("command", command)
-	}
-
-	executor, err := remotecommand.NewSPDYExecutor(i.provider.restclientConfig, http.MethodPost, req.URL())
-	if err != nil {
-		return err
-	}
-
-	os.Stdout.Sync()
-	os.Stderr.Sync()
-
-	err = executor.Stream(remotecommand.StreamOptions{
-		Stdin:             reader,
-		Stdout:            os.Stdout,
-		Stderr:            os.Stderr,
-		Tty:               false,
-		TerminalSizeQueue: nil,
-	})
-
-	return err
+	command := []string{"tar", "xf", "-"}
+	return i.execute(command, reader, nil, nil)
 }
 
 func (p *kubernetesProvider) Setup(ctx gocontext.Context) error {
@@ -409,8 +402,10 @@ type kubernetesInstance struct {
 }
 
 func (i *kubernetesInstance) UploadScript(ctx gocontext.Context, script []byte) error {
-	i.uploadScriptNative(ctx, script)
-	return i.uploadScriptSCP(ctx, script)
+	// TODO: Need to inspect readiness instead of static sleep period
+	time.Sleep(10 * time.Second)
+	return i.uploadScriptNative(ctx, script)
+	//return i.uploadScriptSCP(ctx, script)
 
 }
 
@@ -438,7 +433,21 @@ func (i *kubernetesInstance) sshConnection(ctx gocontext.Context) (ssh.Connectio
 }
 
 func (i *kubernetesInstance) RunScript(ctx gocontext.Context, output io.Writer) (*RunResult, error) {
-	return i.runScriptSSH(ctx, output)
+	return i.runScriptExec(ctx, output)
+	//return i.runScriptSSH(ctx, output)
+}
+
+func (i *kubernetesInstance) runScriptExec(ctx gocontext.Context, output io.Writer) (*RunResult, error) {
+	command := []string{"su", "-l", "-c", "/home/travis/build.sh", "-", "travis"}
+	err := i.execute(command, nil, output, nil)
+
+	exitCode := uint8(0)
+
+	if err != nil {
+		exitCode = uint8(1)
+	}
+
+	return &RunResult{Completed: err != nil, ExitCode: exitCode}, errors.Wrap(err, "error running script")
 }
 
 func (i *kubernetesInstance) runScriptSSH(ctx gocontext.Context, output io.Writer) (*RunResult, error) {
@@ -455,24 +464,30 @@ func (i *kubernetesInstance) runScriptSSH(ctx gocontext.Context, output io.Write
 
 func (i *kubernetesInstance) Stop(ctx gocontext.Context) error {
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
-	hostName := hostnameFromContext(ctx)
-	_, err := exec.Command(fmt.Sprintf("%s/step_stop.sh", defaultKubernetesScriptLocation), hostName).Output()
+	/*
+		hostName := hostnameFromContext(ctx)
+		_, err := exec.Command(fmt.Sprintf("%s/step_stop.sh", defaultKubernetesScriptLocation), hostName).Output()
 
-	if err != nil {
-		logger.WithField("err", err).Error("couldn't run script ")
-	}
-
+		if err != nil {
+			logger.WithField("err", err).Error("couldn't run script ")
+		}
+	*/
 	deletePolicy := metav1.DeletePropagationForeground
 
-	err = i.provider.clientSet.CoreV1().Pods(i.provider.kubernetesNamespace).Delete(i.pod.Name, &metav1.DeleteOptions{
+	err := i.provider.clientSet.CoreV1().Pods(i.provider.kubernetesNamespace).Delete(i.pod.Name, &metav1.DeleteOptions{
 		PropagationPolicy: &deletePolicy,
 	})
+
+	if err != nil {
+		logger.Warn("couldn't stop pod")
+		return err
+	}
 
 	return err
 }
 
 func (i *kubernetesInstance) ID() string {
-	return i.container.HostName
+	return i.pod.Name
 }
 
 func (i *kubernetesInstance) ImageName() string {
