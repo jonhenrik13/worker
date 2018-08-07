@@ -20,6 +20,7 @@ import (
 	"github.com/travis-ci/worker/config"
 	"github.com/travis-ci/worker/context"
 	"github.com/travis-ci/worker/image"
+	"github.com/travis-ci/worker/metrics"
 	"github.com/travis-ci/worker/ssh"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -86,7 +87,16 @@ type kubernetesProvider struct {
 
 func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 
-	config, err := clientcmd.BuildConfigFromFlags("", defaultKubeConfig)
+	kubeConfigPath := defaultKubeConfig
+	if cfg.IsSet("KUBECONFIG_PATH") {
+		kubeConfigPath = cfg.Get("KUBECONFIG_PATH")
+	}
+
+	if _, err := os.Stat(kubeConfigPath); err != nil {
+		return nil, err
+	}
+
+	config, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +215,8 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 
 	hostName := hostnameFromContext(ctx)
 
+	// TODO: Need to remove existing pods with the same name and wait for termination
+
 	podSpec := &apiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: fmt.Sprintf("%s", hostName),
@@ -227,10 +239,59 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		},
 	}
 
+	if p.dockerRegistryUser != "" && p.dockerRegistryPassword != "" {
+		podSpec.Spec.ImagePullSecrets = []apiv1.LocalObjectReference{
+			apiv1.LocalObjectReference{
+				Name: defaultDockerCfgSecretName,
+			},
+		}
+	}
+
+	startBooting := time.Now()
+
 	pod, err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Create(podSpec)
 
 	if err != nil {
 		return nil, err
+	}
+
+	podReady := make(chan apiv1.PodStatus)
+	errChan := make(chan error)
+
+	go func(podName string) {
+		for {
+			runningPod, err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Get(podName, metav1.GetOptions{})
+			if err != nil {
+				errChan <- err
+				return
+			}
+			if runningPod.Status.Phase == "Running" {
+				podReady <- runningPod.Status
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}(pod.Name)
+
+	select {
+	case <-podReady:
+		metrics.TimeSince("worker.vm.provider.docker.boot", startBooting)
+		return &kubernetesInstance{
+			provider:        p,
+			startupDuration: dur,
+			pod:             pod,
+			imageName:       selectedImageID,
+			startBooting:    startBooting,
+			endBooting:      time.Now(),
+			//container:       &container,
+		}, nil
+	case err := <-errChan:
+		return nil, err
+	case <-ctx.Done():
+		if ctx.Err() == gocontext.DeadlineExceeded {
+			metrics.Mark("worker.vm.provider.docker.boot.timeout")
+		}
+		return nil, ctx.Err()
 	}
 
 	/*
@@ -249,13 +310,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 			logger.WithField("err", err).Error("unable to unmarshal output from script")
 		}
 	*/
-	return &kubernetesInstance{
-		provider:        p,
-		startupDuration: dur,
-		pod:             pod,
-		imageName:       selectedImageID,
-		//container:       &container,
-	}, nil
+
 }
 
 func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -328,7 +383,7 @@ func (p *kubernetesProvider) Setup(ctx gocontext.Context) error {
 
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
 	if p.dockerRegistryUser != "" && p.dockerRegistryPassword != "" {
-		secret, err := createDockerRegistrySecret(p.kubernetesNamespace, p.dockerRegistryHost, p.dockerRegistryUser, p.dockerRegistryPassword, "")
+		secret, err := createDockerRegistrySecret(p.kubernetesNamespace, p.dockerRegistryHost, p.dockerRegistryUser, p.dockerRegistryPassword, p.dockerRegistryUser)
 
 		if err != nil {
 			logger.WithField("err", err).Error("Unable to manage auth for docker registry")
@@ -399,11 +454,11 @@ type kubernetesInstance struct {
 	imageName       string
 	container       *kubernetesContainerTmp
 	startupDuration time.Duration
+	startBooting    time.Time
+	endBooting      time.Time
 }
 
 func (i *kubernetesInstance) UploadScript(ctx gocontext.Context, script []byte) error {
-	// TODO: Need to inspect readiness instead of static sleep period
-	time.Sleep(10 * time.Second)
 	return i.uploadScriptNative(ctx, script)
 	//return i.uploadScriptSCP(ctx, script)
 
@@ -495,7 +550,7 @@ func (i *kubernetesInstance) ImageName() string {
 }
 
 func (i *kubernetesInstance) StartupDuration() time.Duration {
-	return i.startupDuration
+	return i.endBooting.Sub(i.startBooting)
 }
 
 /*
