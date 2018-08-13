@@ -82,6 +82,10 @@ type kubernetesProvider struct {
 	dockerRegistryUser     string
 	dockerRegistryPassword string
 	kubernetesNamespace    string
+	limitCPU               string
+	limitMemory            string
+	requestsCPU            string
+	requestsMemory         string
 	imageSelector          image.Selector
 }
 
@@ -104,7 +108,6 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 	clientSet, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, err
-
 	}
 
 	sshDialer, err := ssh.NewDialerWithPassword("travis")
@@ -211,8 +214,6 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		return nil, err
 	}
 
-	fmt.Printf("Image name is: %s\n", selectedImageID)
-
 	hostName := hostnameFromContext(ctx)
 
 	// TODO: Need to remove existing pods with the same name and wait for termination
@@ -283,7 +284,6 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 			imageName:       selectedImageID,
 			startBooting:    startBooting,
 			endBooting:      time.Now(),
-			//container:       &container,
 		}, nil
 	case err := <-errChan:
 		return nil, err
@@ -293,24 +293,6 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		}
 		return nil, ctx.Err()
 	}
-
-	/*
-		fmt.Printf("Created deployment %q.\n", pod.GetObjectMeta().GetName())
-
-		out, err := exec.Command(fmt.Sprintf("%s/step_start.sh", defaultKubernetesScriptLocation), hostName).Output()
-
-		if err != nil {
-			logger.WithField("err", err).Error("couldn't run script ")
-		}
-
-		var container kubernetesContainerTmp
-
-		err = json.Unmarshal(out, &container)
-		if err != nil {
-			logger.WithField("err", err).Error("unable to unmarshal output from script")
-		}
-	*/
-
 }
 
 func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -452,7 +434,7 @@ type kubernetesInstance struct {
 	provider        *kubernetesProvider
 	pod             *apiv1.Pod
 	imageName       string
-	container       *kubernetesContainerTmp
+	sshPort         int
 	startupDuration time.Duration
 	startBooting    time.Time
 	endBooting      time.Time
@@ -483,8 +465,8 @@ func (i *kubernetesInstance) uploadScriptSCP(ctx gocontext.Context, script []byt
 }
 
 func (i *kubernetesInstance) sshConnection(ctx gocontext.Context) (ssh.Connection, error) {
-	time.Sleep(2 * time.Second)
-	return i.provider.sshDialer.Dial(fmt.Sprintf("127.0.0.1:%d", i.container.SSHPort), "travis", i.provider.sshDialTimeout)
+	//return i.provider.sshDialer.Dial(fmt.Sprintf("127.0.0.1:%d", i.container.SSHPort), "travis", i.provider.sshDialTimeout)
+	return i.provider.sshDialer.Dial(fmt.Sprintf("127.0.0.1:%d", i.sshPort), "travis", i.provider.sshDialTimeout)
 }
 
 func (i *kubernetesInstance) RunScript(ctx gocontext.Context, output io.Writer) (*RunResult, error) {
@@ -495,14 +477,15 @@ func (i *kubernetesInstance) RunScript(ctx gocontext.Context, output io.Writer) 
 func (i *kubernetesInstance) runScriptExec(ctx gocontext.Context, output io.Writer) (*RunResult, error) {
 	command := []string{"su", "-l", "-c", "/home/travis/build.sh", "-", "travis"}
 	err := i.execute(command, nil, output, nil)
+	/*
+		exitCode := uint8(0)
 
-	exitCode := uint8(0)
-
-	if err != nil {
-		exitCode = uint8(1)
-	}
-
-	return &RunResult{Completed: err != nil, ExitCode: exitCode}, errors.Wrap(err, "error running script")
+		if err != nil {
+			exitCode = uint8(1)
+		}
+		return &RunResult{Completed: err != nil, ExitCode: exitCode}, errors.Wrap(err, "error running script")
+	*/
+	return &RunResult{Completed: err != nil}, errors.Wrap(err, "error running script")
 }
 
 func (i *kubernetesInstance) runScriptSSH(ctx gocontext.Context, output io.Writer) (*RunResult, error) {
@@ -519,25 +502,38 @@ func (i *kubernetesInstance) runScriptSSH(ctx gocontext.Context, output io.Write
 
 func (i *kubernetesInstance) Stop(ctx gocontext.Context) error {
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
-	/*
-		hostName := hostnameFromContext(ctx)
-		_, err := exec.Command(fmt.Sprintf("%s/step_stop.sh", defaultKubernetesScriptLocation), hostName).Output()
 
-		if err != nil {
-			logger.WithField("err", err).Error("couldn't run script ")
+	podTerminated := make(chan error)
+
+	go func(podName string) {
+		for {
+			err := i.provider.deletePod(i.pod.Name)
+			if err == nil {
+				podTerminated <- err
+				return
+			}
+			logger.WithField("err", err).Warn("Unable to communicate with the kubernetes api")
+			time.Sleep(1000 * time.Millisecond)
 		}
-	*/
-	deletePolicy := metav1.DeletePropagationForeground
+	}(i.pod.Name)
 
-	err := i.provider.clientSet.CoreV1().Pods(i.provider.kubernetesNamespace).Delete(i.pod.Name, &metav1.DeleteOptions{
-		PropagationPolicy: &deletePolicy,
-	})
-
-	if err != nil {
-		logger.Warn("couldn't stop pod")
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-podTerminated:
 		return err
-	}
 
+	}
+}
+
+func (p *kubernetesProvider) deletePod(hostname string) error {
+	deletePolicy := metav1.DeletePropagationForeground
+	gracePeriod := int64(10)
+
+	err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Delete(hostname, &metav1.DeleteOptions{
+		PropagationPolicy:  &deletePolicy,
+		GracePeriodSeconds: &gracePeriod,
+	})
 	return err
 }
 
