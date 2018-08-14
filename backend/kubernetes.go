@@ -21,8 +21,8 @@ import (
 	"github.com/travis-ci/worker/context"
 	"github.com/travis-ci/worker/image"
 	"github.com/travis-ci/worker/metrics"
-	"github.com/travis-ci/worker/ssh"
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	scheme "k8s.io/client-go/kubernetes/scheme"
@@ -48,17 +48,16 @@ func init() {
 		"REGISTRY_LOGIN":    "Username for docker registry",
 		"REGISTRY_PASSWORD": "Password for docker registry",
 		"NAMESPACE":         "Kubernetes namespace to use for deploys",
-		"KUBE_CONFIG":       "Path to kubeconfig file",
+		"KUBECONFIG_PATH":   "Path to kubeconfig file",
+		"REQUESTS_CPU":      "How much CPU resources containers in the pod should request",
+		"REQUESTS_MEM":      "How much memory containers in the pod should request",
+		"LIMITS_CPU":        "How much CPU resources containers in the pod should be limited to",
+		"LIMITS_MEM":        "How much memory containers in the pod should be limited to",
 	}, newKubernetesProvider)
 }
 
-/******** POC SECTION ****/
-
-type kubernetesContainerTmp struct {
-	SSHPort  int    `json:"ssh_port"`
-	Status   string `json:"status"`
-	HostName string `json:"hostname"`
-}
+const imageSelectAPI = "api"
+const imageSelectEnv = "env"
 
 var (
 	defaultKubernetesScriptLocation    = "/home/jonhenrik/travis-in-kubernetes"
@@ -75,17 +74,15 @@ type kubernetesProvider struct {
 	cfg                    *config.ProviderConfig
 	clientSet              *kubernetes.Clientset
 	restclientConfig       *rest.Config
-	sshDialer              ssh.Dialer
-	sshDialTimeout         time.Duration
 	execCmd                []string
 	dockerRegistryHost     string
 	dockerRegistryUser     string
 	dockerRegistryPassword string
 	kubernetesNamespace    string
-	limitCPU               string
-	limitMemory            string
+	limitsCPU              string
+	limitsMem              string
 	requestsCPU            string
-	requestsMemory         string
+	requestsMem            string
 	imageSelector          image.Selector
 }
 
@@ -108,20 +105,6 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 	clientSet, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, err
-	}
-
-	sshDialer, err := ssh.NewDialerWithPassword("travis")
-
-	if err != nil {
-		return nil, errors.Wrap(err, "couldn't create SSH dialer")
-	}
-
-	sshDialTimeout := defaultDockerSSHDialTimeout
-	if cfg.IsSet("SSH_DIAL_TIMEOUT") {
-		sshDialTimeout, err = time.ParseDuration(cfg.Get("SSH_DIAL_TIMEOUT"))
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	execCmd := strings.Split(defaultExecCmd, " ")
@@ -156,7 +139,7 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		imageSelectorType = cfg.Get("IMAGE_SELECTOR_TYPE")
 	}
 
-	if imageSelectorType != "env" && imageSelectorType != "api" {
+	if imageSelectorType != imageSelectEnv && imageSelectorType != imageSelectAPI {
 		return nil, fmt.Errorf("invalid image selector type %q", imageSelectorType)
 	}
 
@@ -165,27 +148,48 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		return nil, err
 	}
 
+	limitsCPU := "0"
+	if cfg.IsSet("LIMITS_CPU") {
+		limitsCPU = cfg.Get("LIMITS_CPU")
+	}
+
+	limitsMem := "0"
+	if cfg.IsSet("LIMITS_MEM") {
+		limitsMem = cfg.Get("LIMITS_MEM")
+	}
+
+	requestsCPU := "0"
+	if cfg.IsSet("REQUESTS_CPU") {
+		requestsCPU = cfg.Get("REQUESTS_CPU")
+	}
+
+	requestsMem := "0"
+	if cfg.IsSet("REQUESTS_MEM") {
+		requestsMem = cfg.Get("REQUESTS_MEM")
+	}
+
 	return &kubernetesProvider{
 		cfg:                    cfg,
 		clientSet:              clientSet,
 		restclientConfig:       config,
-		sshDialTimeout:         sshDialTimeout,
-		sshDialer:              sshDialer,
 		execCmd:                execCmd,
 		dockerRegistryHost:     dockerRegistryHost,
 		dockerRegistryPassword: dockerRegistryPassword,
 		dockerRegistryUser:     dockerRegistryUser,
 		kubernetesNamespace:    kubernetesNamespace,
 		imageSelector:          imageSelector,
+		limitsMem:              limitsMem,
+		limitsCPU:              limitsCPU,
+		requestsMem:            requestsMem,
+		requestsCPU:            requestsCPU,
 	}, nil
-
 }
 
 func buildKubernetesImageSelector(selectorType string, cfg *config.ProviderConfig) (image.Selector, error) {
 	switch selectorType {
-	case "env":
+	case imageSelectEnv:
 		return image.NewEnvSelector(cfg)
-	case "api":
+	case imageSelectAPI:
 		baseURL, err := url.Parse(cfg.Get("IMAGE_SELECTOR_URL"))
 		if err != nil {
 			return nil, err
@@ -225,16 +229,19 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		Spec: apiv1.PodSpec{
 			Containers: []apiv1.Container{
 				{
-					Name:  fmt.Sprintf("%s", hostName),
-					Image: selectedImageID,
-					Ports: []apiv1.ContainerPort{
-						{
-							Name:          "ssh",
-							Protocol:      apiv1.ProtocolTCP,
-							ContainerPort: 22,
+					Name:    fmt.Sprintf("%s", hostName),
+					Image:   selectedImageID,
+					Command: []string{"/sbin/init"},
+					Resources: apiv1.ResourceRequirements{
+						Limits: apiv1.ResourceList{
+							apiv1.ResourceCPU:    resource.MustParse(p.limitsCPU),
+							apiv1.ResourceMemory: resource.MustParse(p.limitsMem),
+						},
+						Requests: apiv1.ResourceList{
+							apiv1.ResourceCPU:    resource.MustParse(p.requestsCPU),
+							apiv1.ResourceMemory: resource.MustParse(p.requestsMem),
 						},
 					},
-					Command: []string{"/sbin/init"},
 				},
 			},
 		},
@@ -295,72 +302,6 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 	}
 }
 
-func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, stderr io.Writer) error {
-
-	restClient := i.provider.clientSet.CoreV1().RESTClient()
-
-	req := restClient.Post().
-		Namespace(i.provider.kubernetesNamespace).
-		Resource("pods").
-		Name(i.pod.Name).
-		SubResource("exec")
-
-	req.VersionedParams(&apiv1.PodExecOptions{
-		Stdin:     stdin != nil,
-		Container: i.pod.Name,
-		Stdout:    stdout != nil,
-		Stderr:    stderr != nil,
-		Command:   command,
-	}, scheme.ParameterCodec)
-
-	executor, err := remotecommand.NewSPDYExecutor(i.provider.restclientConfig, http.MethodPost, req.URL())
-	if err != nil {
-		return err
-	}
-
-	err = executor.Stream(remotecommand.StreamOptions{
-		Stdin:             stdin,
-		Stdout:            stdout,
-		Stderr:            stderr,
-		Tty:               false,
-		TerminalSizeQueue: nil,
-	})
-
-	return err
-}
-
-func (i *kubernetesInstance) uploadScriptNative(ctx gocontext.Context, script []byte) error {
-	reader, writer := io.Pipe()
-	defer reader.Close()
-
-	tw := tar.NewWriter(writer)
-
-	go func() error {
-		defer writer.Close()
-		defer tw.Close()
-
-		now := time.Now()
-
-		err := tw.WriteHeader(&tar.Header{
-			Name:       "/home/travis/build.sh",
-			Mode:       0755,
-			Size:       int64(len(script)),
-			AccessTime: now,
-			ModTime:    now,
-			ChangeTime: now,
-		})
-		if err != nil {
-			return err
-		}
-
-		_, err = tw.Write(script)
-		return err
-	}()
-
-	command := []string{"tar", "xf", "-"}
-	return i.execute(command, reader, nil, nil)
-}
-
 func (p *kubernetesProvider) Setup(ctx gocontext.Context) error {
 
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
@@ -390,7 +331,6 @@ func (p *kubernetesProvider) upsertSecret(secret *apiv1.Secret) error {
 	} else {
 
 	}
-
 	return err
 }
 
@@ -434,7 +374,6 @@ type kubernetesInstance struct {
 	provider        *kubernetesProvider
 	pod             *apiv1.Pod
 	imageName       string
-	sshPort         int
 	startupDuration time.Duration
 	startBooting    time.Time
 	endBooting      time.Time
@@ -442,62 +381,88 @@ type kubernetesInstance struct {
 
 func (i *kubernetesInstance) UploadScript(ctx gocontext.Context, script []byte) error {
 	return i.uploadScriptNative(ctx, script)
-	//return i.uploadScriptSCP(ctx, script)
-
 }
 
-func (i *kubernetesInstance) uploadScriptSCP(ctx gocontext.Context, script []byte) error {
-	conn, err := i.sshConnection(ctx)
-	if err != nil {
+func (i *kubernetesInstance) uploadScriptNative(ctx gocontext.Context, script []byte) error {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+
+	tw := tar.NewWriter(writer)
+
+	go func() error {
+		defer writer.Close()
+		defer tw.Close()
+
+		now := time.Now()
+
+		err := tw.WriteHeader(&tar.Header{
+			Name:       "/home/travis/build.sh",
+			Mode:       0755,
+			Size:       int64(len(script)),
+			AccessTime: now,
+			ModTime:    now,
+			ChangeTime: now,
+		})
+		if err != nil {
+			return err
+		}
+
+		_, err = tw.Write(script)
 		return err
-	}
-	defer conn.Close()
+	}()
 
-	existed, err := conn.UploadFile("build.sh", script)
-	if existed {
-		return ErrStaleVM
-	}
-	if err != nil {
-		return errors.Wrap(err, "couldn't upload build script")
-	}
-
-	return nil
-}
-
-func (i *kubernetesInstance) sshConnection(ctx gocontext.Context) (ssh.Connection, error) {
-	//return i.provider.sshDialer.Dial(fmt.Sprintf("127.0.0.1:%d", i.container.SSHPort), "travis", i.provider.sshDialTimeout)
-	return i.provider.sshDialer.Dial(fmt.Sprintf("127.0.0.1:%d", i.sshPort), "travis", i.provider.sshDialTimeout)
+	command := []string{"tar", "xf", "-"}
+	return i.execute(command, reader, nil, nil)
 }
 
 func (i *kubernetesInstance) RunScript(ctx gocontext.Context, output io.Writer) (*RunResult, error) {
 	return i.runScriptExec(ctx, output)
-	//return i.runScriptSSH(ctx, output)
 }
 
 func (i *kubernetesInstance) runScriptExec(ctx gocontext.Context, output io.Writer) (*RunResult, error) {
-	command := []string{"su", "-l", "-c", "/home/travis/build.sh", "-", "travis"}
-	err := i.execute(command, nil, output, nil)
-	/*
-		exitCode := uint8(0)
+	command := []string{"su", "-c", "/home/travis/build.sh", "-", "travis"}
+	err := i.execute(command, nil, output, output)
 
-		if err != nil {
-			exitCode = uint8(1)
-		}
-		return &RunResult{Completed: err != nil, ExitCode: exitCode}, errors.Wrap(err, "error running script")
-	*/
-	return &RunResult{Completed: err != nil}, errors.Wrap(err, "error running script")
+	exitCode := uint8(0)
+	if err != nil {
+		exitCode = uint8(1)
+	}
+
+	return &RunResult{Completed: err != nil, ExitCode: exitCode}, errors.Wrap(err, "error running script")
 }
 
-func (i *kubernetesInstance) runScriptSSH(ctx gocontext.Context, output io.Writer) (*RunResult, error) {
-	conn, err := i.sshConnection(ctx)
+func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, stderr io.Writer) error {
+
+	restClient := i.provider.clientSet.CoreV1().RESTClient()
+
+	req := restClient.Post().
+		Namespace(i.provider.kubernetesNamespace).
+		Resource("pods").
+		Name(i.pod.Name).
+		SubResource("exec")
+
+	req.VersionedParams(&apiv1.PodExecOptions{
+		Stdin:     stdin != nil,
+		Container: i.pod.Name,
+		Stdout:    stdout != nil,
+		Stderr:    stderr != nil,
+		Command:   command,
+	}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(i.provider.restclientConfig, http.MethodPost, req.URL())
 	if err != nil {
-		return &RunResult{Completed: false}, errors.Wrap(err, "couldn't connect to SSH server")
+		return err
 	}
-	defer conn.Close()
 
-	exitStatus, err := conn.RunCommand(strings.Join(i.provider.execCmd, " "), output)
+	err = executor.Stream(remotecommand.StreamOptions{
+		Stdin:             stdin,
+		Stdout:            stdout,
+		Stderr:            stderr,
+		Tty:               false,
+		TerminalSizeQueue: nil,
+	})
 
-	return &RunResult{Completed: err != nil, ExitCode: exitStatus}, errors.Wrap(err, "error running script")
+	return err
 }
 
 func (i *kubernetesInstance) Stop(ctx gocontext.Context) error {
@@ -548,14 +513,3 @@ func (i *kubernetesInstance) ImageName() string {
 func (i *kubernetesInstance) StartupDuration() time.Duration {
 	return i.endBooting.Sub(i.startBooting)
 }
-
-/*
-func getAvailablePort(
-	for {
-    conn, err := net.DialTimeout("tcp", net.JoinHostPort("", port), timeout)
-    if conn != nil {
-        conn.Close()
-        break
-    }
-})
-*/
