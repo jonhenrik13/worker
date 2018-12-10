@@ -60,21 +60,19 @@ const imageSelectAPI = "api"
 const imageSelectEnv = "env"
 
 var (
-	defaultKubernetesScriptLocation    = "/home/jonhenrik/travis-in-kubernetes"
 	defaultKubeConfig                  = filepath.Join(os.Getenv("HOME"), ".kube", "config")
 	defaultDockerCfgSecretName         = "travis-docker-registry"
 	defaultDockerRegistryHostName      = "index.docker.io"
 	defaultKubernetesNamespace         = "default"
 	defaultKubernetesImageSelectorType = "env"
+	defaultKubernetesPodTermGrace      = 1
 )
 
-/****** POC SECTION *******/
-
 type kubernetesProvider struct {
-	cfg                    *config.ProviderConfig
-	clientSet              *kubernetes.Clientset
-	restclientConfig       *rest.Config
-	execCmd                []string
+	cfg              *config.ProviderConfig
+	clientSet        *kubernetes.Clientset
+	restclientConfig *rest.Config
+	//	execCmd                []string
 	dockerRegistryHost     string
 	dockerRegistryUser     string
 	dockerRegistryPassword string
@@ -107,10 +105,12 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		return nil, err
 	}
 
-	execCmd := strings.Split(defaultExecCmd, " ")
-	if cfg.IsSet("EXEC_CMD") {
-		execCmd = strings.Split(cfg.Get("EXEC_CMD"), " ")
-	}
+	/*
+		execCmd := strings.Split(defaultExecCmd, " ")
+		if cfg.IsSet("EXEC_CMD") {
+			execCmd = strings.Split(cfg.Get("EXEC_CMD"), " ")
+		}
+	*/
 
 	dockerRegistryHost := defaultDockerRegistryHostName
 	if cfg.IsSet("REGISTRY_HOSTNAME") {
@@ -169,10 +169,10 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 	}
 
 	return &kubernetesProvider{
-		cfg:                    cfg,
-		clientSet:              clientSet,
-		restclientConfig:       config,
-		execCmd:                execCmd,
+		cfg:              cfg,
+		clientSet:        clientSet,
+		restclientConfig: config,
+		//		execCmd:                execCmd,
 		dockerRegistryHost:     dockerRegistryHost,
 		dockerRegistryPassword: dockerRegistryPassword,
 		dockerRegistryUser:     dockerRegistryUser,
@@ -410,7 +410,13 @@ func (i *kubernetesInstance) uploadScriptNative(ctx gocontext.Context, script []
 		_, err = tw.Write(script)
 		return err
 	}()
-
+	/*
+		file, _ := os.Create("/tmp/build.sh")
+		defer file.Close()
+		_, _ = file.Write(script)
+		file.Sync()
+		file.Close()
+	*/
 	command := []string{"tar", "xf", "-"}
 	return i.execute(command, reader, nil, nil)
 }
@@ -493,7 +499,7 @@ func (i *kubernetesInstance) Stop(ctx gocontext.Context) error {
 
 func (p *kubernetesProvider) deletePod(hostname string) error {
 	deletePolicy := metav1.DeletePropagationForeground
-	gracePeriod := int64(10)
+	gracePeriod := int64(defaultKubernetesPodTermGrace)
 
 	err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Delete(hostname, &metav1.DeleteOptions{
 		PropagationPolicy:  &deletePolicy,
