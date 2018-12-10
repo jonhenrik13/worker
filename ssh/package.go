@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"io"
 	"io/ioutil"
+	"os"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -19,7 +20,8 @@ type Dialer interface {
 }
 type Connection interface {
 	UploadFile(path string, data []byte) (bool, error)
-	RunCommand(command string, output io.Writer) (uint8, error)
+	DownloadFile(path string) ([]byte, error)
+	RunCommand(command string, output io.Writer) (int32, error)
 	Close() error
 }
 
@@ -135,7 +137,34 @@ func (c *sshConnection) UploadFile(path string, data []byte) (bool, error) {
 	return false, nil
 }
 
-func (c *sshConnection) RunCommand(command string, output io.Writer) (uint8, error) {
+func (c *sshConnection) DownloadFile(path string) ([]byte, error) {
+	sftp, err := sftp.NewClient(c.client)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't create SFTP client")
+	}
+	defer sftp.Close()
+
+	// TODO: enforce file size limit
+
+	_, err = sftp.Lstat(path)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't stat file")
+	}
+
+	f, err := sftp.OpenFile(path, os.O_RDONLY)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't open file")
+	}
+
+	buf, err := ioutil.ReadAll(f)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't read contents of file")
+	}
+
+	return buf, nil
+}
+
+func (c *sshConnection) RunCommand(command string, output io.Writer) (int32, error) {
 	session, err := c.client.NewSession()
 	if err != nil {
 		return 0, errors.Wrap(err, "error creating SSH session")
@@ -158,7 +187,7 @@ func (c *sshConnection) RunCommand(command string, output io.Writer) (uint8, err
 
 	switch err := err.(type) {
 	case *ssh.ExitError:
-		return uint8(err.ExitStatus()), nil
+		return int32(err.ExitStatus()), nil
 	default:
 		return 0, errors.Wrap(err, "error running script")
 	}

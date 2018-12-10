@@ -14,6 +14,7 @@ import (
 	"github.com/travis-ci/worker/backend"
 	"github.com/travis-ci/worker/context"
 	"github.com/travis-ci/worker/metrics"
+	"go.opencensus.io/trace"
 )
 
 type amqpJob struct {
@@ -27,6 +28,8 @@ type amqpJob struct {
 	received        time.Time
 	started         time.Time
 	finished        time.Time
+	finishState     FinishState
+	requeued        bool
 	stateCount      uint
 	withLogSharding bool
 }
@@ -48,7 +51,18 @@ func (j *amqpJob) StartAttributes() *backend.StartAttributes {
 	return j.startAttributes
 }
 
+func (j *amqpJob) FinishState() FinishState {
+	return j.finishState
+}
+
+func (j *amqpJob) Requeued() bool {
+	return j.requeued
+}
+
 func (j *amqpJob) Error(ctx gocontext.Context, errMessage string) error {
+	ctx, span := trace.StartSpan(ctx, "amqpJob.Error")
+	defer span.End()
+
 	log, err := j.LogWriter(ctx, time.Minute)
 	if err != nil {
 		return err
@@ -63,6 +77,9 @@ func (j *amqpJob) Error(ctx gocontext.Context, errMessage string) error {
 }
 
 func (j *amqpJob) Requeue(ctx gocontext.Context) error {
+	ctx, span := trace.StartSpan(ctx, "amqpJob.Requeue")
+	defer span.End()
+
 	context.LoggerFromContext(ctx).WithFields(
 		logrus.Fields{
 			"self":       "amqp_job",
@@ -71,6 +88,8 @@ func (j *amqpJob) Requeue(ctx gocontext.Context) error {
 		}).Info("requeueing job")
 
 	metrics.Mark("worker.job.requeue")
+
+	j.requeued = true
 
 	err := j.sendStateUpdate(ctx, "job:test:reset", "reset")
 	if err != nil {
@@ -81,6 +100,9 @@ func (j *amqpJob) Requeue(ctx gocontext.Context) error {
 }
 
 func (j *amqpJob) Received(ctx gocontext.Context) error {
+	ctx, span := trace.StartSpan(ctx, "amqpJob.Received")
+	defer span.End()
+
 	j.received = time.Now()
 
 	if j.payload.Job.QueuedAt != nil {
@@ -91,6 +113,9 @@ func (j *amqpJob) Received(ctx gocontext.Context) error {
 }
 
 func (j *amqpJob) Started(ctx gocontext.Context) error {
+	ctx, span := trace.StartSpan(ctx, "amqpJob.Started")
+	defer span.End()
+
 	j.started = time.Now()
 
 	metrics.TimeSince("travis.worker.job.start_time", j.received)
@@ -99,14 +124,13 @@ func (j *amqpJob) Started(ctx gocontext.Context) error {
 }
 
 func (j *amqpJob) Finish(ctx gocontext.Context, state FinishState) error {
-	context.LoggerFromContext(ctx).WithFields(logrus.Fields{
-		"state":      state,
-		"self":       "amqp_job",
-		"job_id":     j.Payload().Job.ID,
-		"repository": j.Payload().Repository.Slug,
-	}).Info("finishing job")
+	ctx, span := trace.StartSpan(ctx, "amqpJob.Finished")
+	defer span.End()
+
+	j.finishState = state
 
 	j.finished = time.Now()
+
 	if j.received.IsZero() {
 		j.received = j.finished
 	}
@@ -114,6 +138,14 @@ func (j *amqpJob) Finish(ctx gocontext.Context, state FinishState) error {
 	if j.started.IsZero() {
 		j.started = j.finished
 	}
+
+	context.LoggerFromContext(ctx).WithFields(logrus.Fields{
+		"state":           state,
+		"self":            "amqp_job",
+		"job_id":          j.Payload().Job.ID,
+		"repository":      j.Payload().Repository.Slug,
+		"job_duration_ms": j.finished.Sub(j.started).Seconds() * 1e3,
+	}).Info("finishing job")
 
 	metrics.Mark(fmt.Sprintf("travis.worker.job.finish.%s", state))
 	metrics.Mark("travis.worker.job.finish")
@@ -148,6 +180,10 @@ func (j *amqpJob) createStateUpdateBody(ctx gocontext.Context, state string) map
 		body["meta"].(map[string]interface{})["instance_id"] = instanceID
 	}
 
+	if uuid, ok := context.UUIDFromContext(ctx); ok {
+		body["meta"].(map[string]interface{})["uuid"] = uuid
+	}
+
 	if j.Payload().Job.QueuedAt != nil {
 		body["queued_at"] = j.Payload().Job.QueuedAt.UTC().Format(time.RFC3339)
 	}
@@ -161,10 +197,17 @@ func (j *amqpJob) createStateUpdateBody(ctx gocontext.Context, state string) map
 		body["finished_at"] = j.finished.UTC().Format(time.RFC3339)
 	}
 
+	if j.Payload().Trace {
+		body["trace"] = true
+	}
+
 	return body
 }
 
 func (j *amqpJob) sendStateUpdate(ctx gocontext.Context, event, state string) error {
+	ctx, span := trace.StartSpan(ctx, "amqpJob.sendStateUpdate")
+	defer span.End()
+
 	err := j.stateUpdatePool.Process(&amqpStateUpdatePayload{
 		job:   j,
 		ctx:   ctx,
@@ -180,7 +223,9 @@ func (j *amqpJob) sendStateUpdate(ctx gocontext.Context, event, state string) er
 	return err.(error)
 }
 
-func (j *amqpJob) SetupContext(ctx gocontext.Context) gocontext.Context { return ctx }
+func (j *amqpJob) SetupContext(ctx gocontext.Context) gocontext.Context {
+	return ctx
+}
 
 func (j *amqpJob) Name() string { return "amqp" }
 

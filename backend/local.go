@@ -44,6 +44,14 @@ func newLocalProvider(cfg *config.ProviderConfig) (Provider, error) {
 	return &localProvider{cfg: cfg, scriptsDir: scriptsDir}, nil
 }
 
+func (p *localProvider) SupportsProgress() bool {
+	return false
+}
+
+func (p *localProvider) StartWithProgress(ctx gocontext.Context, startAttributes *StartAttributes, _ Progresser) (Instance, error) {
+	return p.Start(ctx, startAttributes)
+}
+
 func (p *localProvider) Start(ctx gocontext.Context, startAttributes *StartAttributes) (Instance, error) {
 	return newLocalInstance(p)
 }
@@ -60,6 +68,14 @@ func newLocalInstance(p *localProvider) (*localInstance, error) {
 	return &localInstance{
 		p: p,
 	}, nil
+}
+
+func (i *localInstance) Warmed() bool {
+	return false
+}
+
+func (i *localInstance) SupportsProgress() bool {
+	return false
 }
 
 func (i *localInstance) UploadScript(ctx gocontext.Context, script []byte) error {
@@ -108,6 +124,10 @@ func (i *localInstance) RunScript(ctx gocontext.Context, writer io.Writer) (*Run
 		}
 		return &RunResult{Completed: true}, nil
 	}
+}
+
+func (i *localInstance) DownloadTrace(ctx gocontext.Context) ([]byte, error) {
+	return nil, ErrDownloadTraceNotImplemented
 }
 
 func (i *localInstance) Stop(ctx gocontext.Context) error {

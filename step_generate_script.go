@@ -8,6 +8,7 @@ import (
 	"github.com/cenk/backoff"
 	"github.com/mitchellh/multistep"
 	"github.com/travis-ci/worker/context"
+	"go.opencensus.io/trace"
 )
 
 type stepGenerateScript struct {
@@ -15,9 +16,13 @@ type stepGenerateScript struct {
 }
 
 func (s *stepGenerateScript) Run(state multistep.StateBag) multistep.StepAction {
-	procCtx := state.Get("procCtx").(gocontext.Context)
 	buildJob := state.Get("buildJob").(Job)
 	ctx := state.Get("ctx").(gocontext.Context)
+
+	defer context.TimeSince(ctx, "step_generate_script_run", time.Now())
+
+	ctx, span := trace.StartSpan(ctx, "GenerateScript.Run")
+	defer span.End()
 
 	logger := context.LoggerFromContext(ctx).WithField("self", "step_generate_script")
 
@@ -40,8 +45,15 @@ func (s *stepGenerateScript) Run(state multistep.StateBag) multistep.StepAction 
 	}
 
 	if err != nil {
+		state.Put("err", err)
+
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnavailable,
+			Message: err.Error(),
+		})
+
 		logger.WithField("err", err).Error("couldn't generate build script, erroring job")
-		err := buildJob.Error(procCtx, "An error occurred while generating the build script.")
+		err := buildJob.Error(ctx, "An error occurred while generating the build script.")
 		if err != nil {
 			logger.WithField("err", err).Error("couldn't requeue job")
 		}

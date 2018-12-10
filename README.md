@@ -2,9 +2,9 @@
 
 Worker is the component of Travis CI that will run a CI job on some form of
 compute instance. It's responsible for getting the bash script from
-[travis-build](https://github.com/travis-ci/travis-build), spin up the compute
-instance (VM, Docker container, or maybe something different), upload the bash
-script, run it and stream the logs back to
+[travis-build](https://github.com/travis-ci/travis-build), spinning up the
+compute instance (VM, Docker container, or maybe something different),
+uploading the bash script, running it, and streaming the logs back to
 [travis-logs](https://github.com/travis-ci/travis-logs). It also sends state
 updates to [travis-hub](https://github.com/travis-ci/travis-hub).
 
@@ -14,7 +14,7 @@ updates to [travis-hub](https://github.com/travis-ci/travis-hub).
 
 Find the version you wish to install on the [GitHub Releases
 page](https://github.com/travis-ci/worker/releases) and download either the
-`darwin-amd64` binary for OS X or the `linux-amd64` binary for Linux. No other
+`darwin-amd64` binary for macOS or the `linux-amd64` binary for Linux. No other
 operating systems or architectures have pre-built binaries at this time.
 
 ### from package
@@ -60,6 +60,34 @@ built-in help system:
 travis-worker --help
 ```
 
+### Environment-based image selection configuration
+
+Some backend providers support image selection based on environment variables.
+The required format uses keys that are prefixed with the provider-specific
+prefix:
+
+- `TRAVIS_WORKER_{UPPERCASE_PROVIDER}_IMAGE_{UPPERCASE_NAME}`: contains an image name
+  string to be used by the backend provider
+
+The following example is for use with the Docker backend:
+
+``` bash
+# matches on `dist: trusty`
+export TRAVIS_WORKER_DOCKER_IMAGE_DIST_TRUSTY=travisci/ci-connie:packer-1420290255-fafafaf
+
+# matches on `dist: bionic`
+export TRAVIS_WORKER_DOCKER_IMAGE_DIST_BIONIC=registry.business.com/fancy/ubuntu:bionic
+
+# resolves for `language: ruby`
+export TRAVIS_WORKER_DOCKER_IMAGE_RUBY=registry.business.com/travisci/ci-ruby:whatever
+
+# resolves for `group: edge` + `language: python`
+export TRAVIS_WORKER_DOCKER_IMAGE_GROUP_EDGE_PYTHON=travisci/ci-garnet:packer-1530230255-fafafaf
+
+# used when no dist, language, or group matches
+export TRAVIS_WORKER_DOCKER_IMAGE_DEFAULT=travisci/ci-garnet:packer-1410230255-fafafaf
+```
+
 
 ## Development: Running Travis Worker locally
 
@@ -75,8 +103,8 @@ Ensure you've defined the necessary environment variables (see `.example.env`).
 ### Pull Docker images
 
 ```
-$ docker pull travisci/ci-amethyst:packer-1504724461
-$ docker tag travisci/ci-amethyst:packer-1504724461 travis:default
+docker pull travisci/ci-amethyst:packer-1504724461
+docker tag travisci/ci-amethyst:packer-1504724461 travis:default
 ```
 
 ### Configuration
@@ -92,6 +120,10 @@ export TRAVIS_WORKER_BUILD_API_URI='https://x:API_KEY@build-staging.travis-ci.or
 
 `TRAVIS_WORKER_BUILD_API_URI` can be found in the env of the job board app, e.g.:
 `heroku config:get JOB_BOARD_BUILD_API_ORG_URL -a job-board-staging`.
+
+#### Images
+
+TODO
 
 #### Configuring the requested provider/backend
 
@@ -109,7 +141,7 @@ export TRAVIS_WORKER_DOCKER_PRIVILEGED="false"                          # option
 export TRAVIS_WORKER_DOCKER_CERT_PATH="/etc/secret-docker-cert-stuff"   # optional
 ```
 
-#### Queue configuration
+### Queue configuration
 
 #### File-based queue
 
@@ -118,7 +150,7 @@ don't have to mess around with RabbitMQ.
 
 You can generate a payload via the `generate-job-payload.rb` script on travis-scheduler:
 
-`$ heroku run -a travis-scheduler-staging script/generate-job-payload.rb <job id> > payload.json`
+`heroku run -a travis-scheduler-staging script/generate-job-payload.rb <job id> > payload.json`
 
 Place the file in the `$TRAVIS_WORKER_QUEUE_NAME/10-created.d/` directory, where
 it will be picked up by the worker.
@@ -136,7 +168,7 @@ The web interface is accessible at http://localhost:15672/
 
 To verify your messages are being published, try:
 
-`$ rabbitmqadmin get queue=reporting.jobs.builds`
+`rabbitmqadmin get queue=reporting.jobs.builds`
 
 Note: You will first need to install `rabbitmqadmin`. See http://localhost:15672/cli
 
@@ -173,9 +205,9 @@ travis-worker --echo-config
 ## Stopping Travis Worker
 
 Travis Worker has two shutdown modes: Graceful and immediate. The graceful
-shutdown will tell the worker to not start any additional jobs, but finish the
+shutdown will tell the worker to not start any additional jobs but finish the
 jobs it is currently running before it shuts down. The immediate shutdown will
-make the worker stop the jobs it's working on and requeue them, and clean up any
+make the worker stop the jobs it's working on, requeue them, and clean up any
 open resources (shut down VMs, cleanly close connections, etc.)
 
 To start a graceful shutdown, send an INT signal to the worker (for example
@@ -184,7 +216,7 @@ worker (for example using `kill -TERM`).
 
 ## Go dependency management
 
-Travis Worker is built via the standard `go` commands, and dependencies managed
+Travis Worker is built via the standard `go` commands and dependencies managed
 by [`gvt`](https://github.com/FiloSottile/gvt).
 
 To work with the dependencies you need to do the following first
@@ -194,7 +226,7 @@ To work with the dependencies you need to do the following first
 
 ### Updating existing vendored dependencies
 
-To update and existing vendored dependency, do the following in *this directory*:
+To update an existing vendored dependency, do the following in *this directory*:
 
 - `gvt update name/of/dependency` e.g. `gvt update github.com/pkg/sftp`
 
@@ -215,8 +247,8 @@ Once you've decided what the next version number should be, update the [changelo
 Once the changelog has been updated and merged to `master`, the merge commit needs to be signed and manually tagged with the version number. To do this, run:
 
 ```
-$ git tag --sign -a vX.X.X -m "Worker version vX.X.X"
-$ git push origin vX.X.X
+git tag --sign -a vX.X.X -m "Worker version vX.X.X"
+git push origin vX.X.X
 ```
 
 The Travis build corresponding to this push should build and upload a worker image with the new tag to [Dockerhub](https://hub.docker.com/r/travisci/worker/tags/).

@@ -6,9 +6,12 @@ import (
 	gocontext "context"
 
 	"github.com/mitchellh/multistep"
+	"github.com/pborman/uuid"
 	"github.com/sirupsen/logrus"
 	"github.com/travis-ci/worker/backend"
+	"github.com/travis-ci/worker/config"
 	"github.com/travis-ci/worker/context"
+	"go.opencensus.io/trace"
 )
 
 // A Processor gets jobs off the job queue and coordinates running it with other
@@ -16,19 +19,14 @@ import (
 type Processor struct {
 	ID       string
 	hostname string
-
-	hardTimeout             time.Duration
-	initialSleep            time.Duration
-	logTimeout              time.Duration
-	maxLogLength            int
-	scriptUploadTimeout     time.Duration
-	startupTimeout          time.Duration
-	payloadFilterExecutable string
+	config   *config.Config
 
 	ctx                     gocontext.Context
 	buildJobsChan           <-chan Job
 	provider                backend.Provider
 	generator               BuildScriptGenerator
+	persister               BuildTracePersister
+	logWriterFactory        LogWriterFactory
 	cancellationBroadcaster *CancellationBroadcaster
 
 	graceful   chan struct{}
@@ -46,25 +44,17 @@ type Processor struct {
 
 	// LastJobID contains the ID of the last job the processor processed.
 	LastJobID uint64
-
-	SkipShutdownOnLogTimeout bool
 }
 
 type ProcessorConfig struct {
-	HardTimeout             time.Duration
-	InitialSleep            time.Duration
-	LogTimeout              time.Duration
-	MaxLogLength            int
-	ScriptUploadTimeout     time.Duration
-	StartupTimeout          time.Duration
-	PayloadFilterExecutable string
+	Config *config.Config
 }
 
 // NewProcessor creates a new processor that will run the build jobs on the
 // given channel using the given provider and getting build scripts from the
 // generator.
 func NewProcessor(ctx gocontext.Context, hostname string, queue JobQueue,
-	provider backend.Provider, generator BuildScriptGenerator, cancellationBroadcaster *CancellationBroadcaster,
+	logWriterFactory LogWriterFactory, provider backend.Provider, generator BuildScriptGenerator, persister BuildTracePersister, cancellationBroadcaster *CancellationBroadcaster,
 	config ProcessorConfig) (*Processor, error) {
 
 	processorID, _ := context.ProcessorFromContext(ctx)
@@ -81,20 +71,15 @@ func NewProcessor(ctx gocontext.Context, hostname string, queue JobQueue,
 	return &Processor{
 		ID:       processorID,
 		hostname: hostname,
-
-		initialSleep:            config.InitialSleep,
-		hardTimeout:             config.HardTimeout,
-		logTimeout:              config.LogTimeout,
-		scriptUploadTimeout:     config.ScriptUploadTimeout,
-		startupTimeout:          config.StartupTimeout,
-		maxLogLength:            config.MaxLogLength,
-		payloadFilterExecutable: config.PayloadFilterExecutable,
+		config:   config.Config,
 
 		ctx:                     ctx,
 		buildJobsChan:           buildJobsChan,
 		provider:                provider,
 		generator:               generator,
+		persister:               persister,
 		cancellationBroadcaster: cancellationBroadcaster,
+		logWriterFactory:        logWriterFactory,
 
 		graceful:  make(chan struct{}),
 		terminate: cancel,
@@ -138,9 +123,11 @@ func (p *Processor) Run() {
 				return
 			}
 
+			buildJob.StartAttributes().ProgressType = p.config.ProgressType
+
 			jobID := buildJob.Payload().Job.ID
 
-			hardTimeout := p.hardTimeout
+			hardTimeout := p.config.HardTimeout
 			if buildJob.Payload().Timeouts.HardLimit != 0 {
 				hardTimeout = time.Duration(buildJob.Payload().Timeouts.HardLimit) * time.Second
 			}
@@ -153,14 +140,9 @@ func (p *Processor) Run() {
 			ctx := context.FromJobID(context.FromRepository(p.ctx, buildJob.Payload().Repository.Slug), buildJob.Payload().Job.ID)
 			if buildJob.Payload().UUID != "" {
 				ctx = context.FromUUID(ctx, buildJob.Payload().UUID)
+			} else {
+				ctx = context.FromUUID(ctx, uuid.NewRandom().String())
 			}
-
-			logger.WithFields(logrus.Fields{
-				"hard_timeout": hardTimeout,
-				"job_id":       jobID,
-			}).Debug("getting wrapped context with timeout")
-			ctx, cancel := gocontext.WithTimeout(ctx, hardTimeout)
-
 			logger.WithFields(logrus.Fields{
 				"job_id": jobID,
 				"status": "processing",
@@ -175,7 +157,6 @@ func (p *Processor) Run() {
 				"status": "waiting",
 			}).Debug("updating processor status")
 			p.CurrentStatus = "waiting"
-			cancel()
 		case <-time.After(10 * time.Second):
 			logger.Debug("timeout waiting for job, shutdown, or context done")
 		}
@@ -205,18 +186,34 @@ func (p *Processor) Terminate() {
 }
 
 func (p *Processor) process(ctx gocontext.Context, buildJob Job) {
+	ctx = buildJob.SetupContext(ctx)
+	ctx = context.WithTimings(ctx)
+
+	ctx, span := trace.StartSpan(ctx, "ProcessorRun")
+	defer span.End()
+
+	span.AddAttributes(
+		trace.StringAttribute("app", "worker"),
+		trace.Int64Attribute("job_id", int64(buildJob.Payload().Job.ID)),
+		trace.StringAttribute("repo", buildJob.Payload().Repository.Slug),
+		trace.StringAttribute("infra", p.config.ProviderName),
+		trace.StringAttribute("site", p.config.TravisSite),
+	)
+
 	state := new(multistep.BasicStateBag)
 	state.Put("hostname", p.ID)
 	state.Put("buildJob", buildJob)
-	state.Put("procCtx", buildJob.SetupContext(p.ctx))
-	state.Put("ctx", buildJob.SetupContext(ctx))
+	state.Put("logWriterFactory", p.logWriterFactory)
+	state.Put("ctx", ctx)
+	state.Put("processedAt", time.Now().UTC())
+	state.Put("infra", p.config.Infra)
 
 	logger := context.LoggerFromContext(ctx).WithFields(logrus.Fields{
 		"job_id": buildJob.Payload().Job.ID,
 		"self":   "processor",
 	})
 
-	logTimeout := p.logTimeout
+	logTimeout := p.config.LogTimeout
 	if buildJob.Payload().Timeouts.LogSilence != 0 {
 		logTimeout = time.Duration(buildJob.Payload().Timeouts.LogSilence) * time.Second
 	}
@@ -226,26 +223,26 @@ func (p *Processor) process(ctx gocontext.Context, buildJob Job) {
 			cancellationBroadcaster: p.cancellationBroadcaster,
 		},
 		&stepTransformBuildJSON{
-			payloadFilterExecutable: p.payloadFilterExecutable,
+			payloadFilterExecutable: p.config.PayloadFilterExecutable,
 		},
 		&stepGenerateScript{
 			generator: p.generator,
 		},
 		&stepSendReceived{},
-		&stepSleep{duration: p.initialSleep},
+		&stepSleep{duration: p.config.InitialSleep},
 		&stepCheckCancellation{},
 		&stepOpenLogWriter{
-			maxLogLength:      p.maxLogLength,
-			defaultLogTimeout: p.logTimeout,
+			maxLogLength:      p.config.MaxLogLength,
+			defaultLogTimeout: p.config.LogTimeout,
 		},
 		&stepCheckCancellation{},
 		&stepStartInstance{
 			provider:     p.provider,
-			startTimeout: p.startupTimeout,
+			startTimeout: p.config.StartupTimeout,
 		},
 		&stepCheckCancellation{},
 		&stepUploadScript{
-			uploadTimeout: p.scriptUploadTimeout,
+			uploadTimeout: p.config.ScriptUploadTimeout,
 		},
 		&stepCheckCancellation{},
 		&stepUpdateState{},
@@ -253,8 +250,11 @@ func (p *Processor) process(ctx gocontext.Context, buildJob Job) {
 		&stepCheckCancellation{},
 		&stepRunScript{
 			logTimeout:               logTimeout,
-			hardTimeout:              p.hardTimeout,
-			skipShutdownOnLogTimeout: p.SkipShutdownOnLogTimeout,
+			hardTimeout:              buildJob.StartAttributes().HardTimeout,
+			skipShutdownOnLogTimeout: p.config.SkipShutdownOnLogTimeout,
+		},
+		&stepDownloadTrace{
+			persister: p.persister,
 		},
 	}
 
@@ -262,6 +262,33 @@ func (p *Processor) process(ctx gocontext.Context, buildJob Job) {
 
 	logger.Info("starting job")
 	runner.Run(state)
-	logger.Info("finished job")
+
+	fields := context.LoggerTimingsFromContext(ctx)
+	instance, ok := state.Get("instance").(backend.Instance)
+	if ok {
+		fields["instance_id"] = instance.ID()
+		fields["image_name"] = instance.ImageName()
+	}
+	err, ok := state.Get("err").(error)
+	if ok {
+		fields["err"] = err
+	}
+	if buildJob.FinishState() != "" {
+		fields["state"] = buildJob.FinishState()
+	}
+	if buildJob.Requeued() {
+		fields["requeued"] = 1
+	}
+	logger.WithFields(fields).Info("finished job")
+
 	p.ProcessedCount++
+}
+
+func (p *Processor) processorInfo() processorInfo {
+	return processorInfo{
+		ID:        p.ID,
+		Processed: p.ProcessedCount,
+		Status:    p.CurrentStatus,
+		LastJobID: p.LastJobID,
+	}
 }

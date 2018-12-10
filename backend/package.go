@@ -69,6 +69,13 @@ type Provider interface {
 	// ready to call UploadScript on (this may, for example, mean that it
 	// waits for SSH connections to be possible).
 	Start(gocontext.Context, *StartAttributes) (Instance, error)
+
+	// StartWithProgress starts an instance as with Start and also reports
+	// progress via an io.Writer.
+	StartWithProgress(gocontext.Context, *StartAttributes, Progresser) (Instance, error)
+
+	// SupportsProgress allows for querying of progress support, yeah!
+	SupportsProgress() bool
 }
 
 // An Instance is something that can run a build script.
@@ -81,6 +88,11 @@ type Instance interface {
 	// RunScript runs the build script that was uploaded with the
 	// UploadScript method.
 	RunScript(gocontext.Context, io.Writer) (*RunResult, error)
+
+	// DownloadTrace attempts to download a job trace from the instance
+	DownloadTrace(gocontext.Context) ([]byte, error)
+
+	// Stop stops (and deletes) the instance
 	Stop(gocontext.Context) error
 
 	// ID is used when identifying the instance in logs and such
@@ -91,12 +103,18 @@ type Instance interface {
 
 	// StartupDuration is the duration between "created" and "ready"
 	StartupDuration() time.Duration
+
+	// SupportsProgress allows for querying of progress support, yeah!
+	SupportsProgress() bool
+
+	// Check if this instance came from the warmer service
+	Warmed() bool
 }
 
 // RunResult represents the result of running a script with Instance.RunScript.
 type RunResult struct {
 	// The exit code of the script. Only valid if Completed is true.
-	ExitCode uint8
+	ExitCode int32
 
 	// Whether the script finished running or not. Can be false if there was a
 	// connection error in the middle of the script run.

@@ -11,6 +11,7 @@ import (
 	"github.com/travis-ci/worker/backend"
 	"github.com/travis-ci/worker/context"
 	"github.com/travis-ci/worker/metrics"
+	"go.opencensus.io/trace"
 )
 
 type stepUploadScript struct {
@@ -18,20 +19,40 @@ type stepUploadScript struct {
 }
 
 func (s *stepUploadScript) Run(state multistep.StateBag) multistep.StepAction {
-	procCtx := state.Get("procCtx").(gocontext.Context)
 	ctx := state.Get("ctx").(gocontext.Context)
 	buildJob := state.Get("buildJob").(Job)
+	logWriter := state.Get("logWriter").(LogWriter)
+	processedAt := state.Get("processedAt").(time.Time)
 
 	instance := state.Get("instance").(backend.Instance)
 	script := state.Get("script").([]byte)
 
 	logger := context.LoggerFromContext(ctx).WithField("self", "step_upload_script")
 
+	defer context.TimeSince(ctx, "step_upload_script_run", time.Now())
+
+	ctx, span := trace.StartSpan(ctx, "UploadScript.Run")
+	defer span.End()
+
+	preTimeoutCtx := ctx
+
 	ctx, cancel := gocontext.WithTimeout(ctx, s.uploadTimeout)
 	defer cancel()
 
+	if instance.SupportsProgress() && buildJob.StartAttributes().ProgressType == "text" {
+		writeFoldStart(logWriter, "step_upload_script", []byte("\033[33;1mUploading script\033[0m\r\n"))
+		defer writeFoldEnd(logWriter, "step_upload_script", []byte(""))
+	}
+
 	err := instance.UploadScript(ctx, script)
 	if err != nil {
+		state.Put("err", err)
+
+		span.SetStatus(trace.Status{
+			Code:    trace.StatusCodeUnavailable,
+			Message: err.Error(),
+		})
+
 		errMetric := "worker.job.upload.error"
 		if errors.Cause(err) == backend.ErrStaleVM {
 			errMetric += ".stalevm"
@@ -44,7 +65,7 @@ func (s *stepUploadScript) Run(state multistep.StateBag) multistep.StepAction {
 		}).Error("couldn't upload script, attempting requeue")
 		context.CaptureError(ctx, err)
 
-		err := buildJob.Requeue(procCtx)
+		err := buildJob.Requeue(preTimeoutCtx)
 		if err != nil {
 			logger.WithField("err", err).Error("couldn't requeue job")
 		}
@@ -52,7 +73,9 @@ func (s *stepUploadScript) Run(state multistep.StateBag) multistep.StepAction {
 		return multistep.ActionHalt
 	}
 
-	logger.Info("uploaded script")
+	logger.WithFields(logrus.Fields{
+		"since_processed_ms": time.Since(processedAt).Seconds() * 1e3,
+	}).Info("uploaded script")
 
 	return multistep.ActionContinue
 }

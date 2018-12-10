@@ -203,6 +203,13 @@ var (
 		NewConfigDef("BuildCacheS3AccessKeyID", &cli.StringFlag{}),
 		NewConfigDef("BuildCacheS3SecretAccessKey", &cli.StringFlag{}),
 
+		NewConfigDef("BuildTraceEnabled", &cli.BoolFlag{
+			Usage: "Enable downloading build traces",
+		}),
+		NewConfigDef("BuildTraceS3Bucket", &cli.StringFlag{}),
+		NewConfigDef("BuildTraceS3KeyPrefix", &cli.StringFlag{}),
+		NewConfigDef("BuildTraceS3Region", &cli.StringFlag{}),
+
 		// non-config and special case flags
 		NewConfigDef("PayloadFilterExecutable", &cli.StringFlag{
 			Usage: "External executable which will be called to filter the json to be sent to the build script generator",
@@ -213,17 +220,20 @@ var (
 		NewConfigDef("BuildAPIInsecureSkipVerify", &cli.BoolFlag{
 			Usage: "Skip build API TLS verification (useful for Enterprise and testing)",
 		}),
-		NewConfigDef("pprof-port", &cli.StringFlag{
-			Usage: "enable pprof http endpoint (and internal http api) at port",
+		NewConfigDef("ProgressType", &cli.StringFlag{
+			Usage: "Report progress for supported backends (valid values \"text\" or unset)",
 		}),
-		NewConfigDef("http-api-port", &cli.StringFlag{
-			Usage: "enable http api (and pprof) at port",
+		NewConfigDef("remote-controller-addr", &cli.StringFlag{
+			Usage: "enable remote controller http api (and pprof) at address",
 		}),
-		NewConfigDef("http-api-auth", &cli.StringFlag{
-			Usage: "username:password for http api basic auth",
+		NewConfigDef("remote-controller-auth", &cli.StringFlag{
+			Usage: "username:password for http api basic auth for remote controller",
 		}),
 		NewConfigDef("silence-metrics", &cli.BoolFlag{
-			Usage: "silence metrics logging in case no Librato creds have been provided",
+			Usage: "deprecated flag",
+		}),
+		NewConfigDef("log-metrics", &cli.BoolFlag{
+			Usage: "periodically print metrics to the stdout",
 		}),
 		NewConfigDef("echo-config", &cli.BoolFlag{
 			Usage: "echo parsed config and exit",
@@ -245,6 +255,22 @@ var (
 		}),
 		NewConfigDef("heartbeat-url-auth-token", &cli.StringFlag{
 			Usage: "auth token for health check and/or supervisor check URL (may be \"file://path/to/file\")",
+		}),
+		NewConfigDef("Infra", &cli.StringFlag{
+			Usage: "infra tag, e.g. gce or ec2",
+		}),
+		NewConfigDef("StackdriverTraceAccountJSON", &cli.StringFlag{
+			Usage: "file path or JSON to stackdriver trace on Google Cloud",
+		}),
+		NewConfigDef("StackdriverProjectID", &cli.StringFlag{
+			Usage: "google cloud project ID where where traces are exported and viewed",
+		}),
+		NewConfigDef("OpencensusTracingEnabled", &cli.BoolFlag{
+			Usage: "enable tracing for worker with google stackdriver client",
+		}),
+		NewConfigDef("OpencensusSamplingRate", &cli.IntFlag{
+			Usage: "sample rate for trace as an inverse fraction - for sample rate n, every nth event will be sampled",
+			Value: 1,
 		}),
 	}
 
@@ -375,6 +401,11 @@ type Config struct {
 	ScriptUploadTimeout time.Duration `config:"script-upload-timeout"`
 	StartupTimeout      time.Duration `config:"startup-timeout"`
 
+	BuildTraceEnabled     bool   `config:"build-trace-enabled"`
+	BuildTraceS3Bucket    string `config:"build-trace-s3-bucket"`
+	BuildTraceS3KeyPrefix string `config:"build-trace-s3-key-prefix"`
+	BuildTraceS3Region    string `config:"build-trace-s3-region"`
+
 	SentryHookErrors           bool `config:"sentry-hook-errors"`
 	BuildAPIInsecureSkipVerify bool `config:"build-api-insecure-skip-verify"`
 	SkipShutdownOnLogTimeout   bool `config:"skip-shutdown-on-log-timeout"`
@@ -396,7 +427,13 @@ type Config struct {
 	BuildCacheS3AccessKeyID     string `config:"build-cache-s3-access-key-id"`
 	BuildCacheS3SecretAccessKey string `config:"build-cache-s3-secret-access-key"`
 
-	PayloadFilterExecutable string `config:"payload-filter-executable"`
+	PayloadFilterExecutable     string `config:"payload-filter-executable"`
+	ProgressType                string `config:"progress-type"`
+	Infra                       string `config:"infra"`
+	StackdriverTraceAccountJSON string `config:"stackdriver-trace-account-json"`
+	StackdriverProjectID        string `config:"stackdriver-project-id"`
+	OpencensusTracingEnabled    bool   `config:"opencensus-tracing-enabled"`
+	OpencensusSamplingRate      int    `config:"opencensus-sampling-rate"`
 
 	ProviderConfig *ProviderConfig
 }

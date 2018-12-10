@@ -32,6 +32,16 @@ func (w *byteBufferLogWriter) Timeout() <-chan time.Time {
 func (w *byteBufferLogWriter) SetMaxLogLength(m int) {
 }
 
+func (w *byteBufferLogWriter) SetJobStarted(meta *JobStartedMeta) {
+}
+
+func (w *byteBufferLogWriter) SetCancelFunc(_ gocontext.CancelFunc) {
+}
+
+func (w *byteBufferLogWriter) MaxLengthReached() bool {
+	return false
+}
+
 func setupStepWriteWorkerInfo() (*stepWriteWorkerInfo, *byteBufferLogWriter, multistep.StateBag) {
 	s := &stepWriteWorkerInfo{}
 
@@ -48,6 +58,7 @@ func setupStepWriteWorkerInfo() (*stepWriteWorkerInfo, *byteBufferLogWriter, mul
 	}
 
 	state := &multistep.BasicStateBag{}
+	state.Put("ctx", ctx)
 	state.Put("logWriter", logWriter)
 	state.Put("instance", instance)
 	state.Put("hostname", "frizzlefry.example.local")

@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -21,6 +20,12 @@ import (
 	_ "net/http/pprof"
 
 	gocontext "context"
+
+	googlecloudtrace "cloud.google.com/go/trace"
+	"contrib.go.opencensus.io/exporter/stackdriver"
+	"go.opencensus.io/trace"
+	"golang.org/x/oauth2/google"
+	"google.golang.org/api/option"
 
 	"github.com/cenk/backoff"
 	"github.com/getsentry/raven-go"
@@ -52,11 +57,12 @@ type CLI struct {
 
 	Config                  *config.Config
 	BuildScriptGenerator    BuildScriptGenerator
+	BuildTracePersister     BuildTracePersister
 	BackendProvider         backend.Provider
 	ProcessorPool           *ProcessorPool
 	CancellationBroadcaster *CancellationBroadcaster
 	JobQueue                JobQueue
-	LogsQueue               LogsQueue
+	LogWriterFactory        LogWriterFactory
 
 	heartbeatErrSleep time.Duration
 	heartbeatSleep    time.Duration
@@ -94,28 +100,6 @@ func (i *CLI) Setup() (bool, error) {
 
 	i.Config = config.FromCLIContext(i.c)
 
-	if i.c.String("pprof-port") != "" && i.c.String("http-api-port") != "" {
-		return false, fmt.Errorf("only one http port is allowed. "+
-			"pprof-port=%v http-api-port=%v",
-			i.c.String("pprof-port"), i.c.String("http-api-port"))
-	}
-	if i.c.String("pprof-port") != "" || i.c.String("http-api-port") != "" {
-		if i.c.String("http-api-auth") != "" {
-			i.setupHTTPAPI()
-		} else {
-			i.logger.Info("skipping HTTP API setup without http-api-auth set")
-		}
-		go func() {
-			httpPort := i.c.String("http-api-port")
-			if httpPort == "" {
-				httpPort = i.c.String("pprof-port")
-			}
-			httpAddr := fmt.Sprintf("localhost:%s", httpPort)
-			i.logger.Info("listening at ", httpAddr)
-			http.ListenAndServe(httpAddr, nil)
-		}()
-	}
-
 	if i.c.Bool("echo-config") {
 		config.WriteEnvConfig(i.Config, os.Stdout)
 		return false, nil
@@ -133,10 +117,26 @@ func (i *CLI) Setup() (bool, error) {
 	i.setupSentry()
 	i.setupMetrics()
 
+	err := i.setupOpenCensus(ctx)
+	if err != nil {
+		logger.WithField("err", err).Error("failed to set up opencensus")
+		return false, err
+	}
+
+	ctx, span := trace.StartSpan(ctx, "CLI.Setup")
+	defer span.End()
+
+	span.AddAttributes(trace.StringAttribute("provider", i.Config.ProviderName))
+
 	generator := NewBuildScriptGenerator(i.Config)
 	logger.WithField("build_script_generator", fmt.Sprintf("%#v", generator)).Debug("built")
 
 	i.BuildScriptGenerator = generator
+
+	persister := NewBuildTracePersister(i.Config)
+	logger.WithField("build_trace_persister", fmt.Sprintf("%#v", persister)).Debug("built")
+
+	i.BuildTracePersister = persister
 
 	if i.Config.TravisSite != "" {
 		i.Config.ProviderConfig.Set("TRAVIS_SITE", i.Config.TravisSite)
@@ -160,23 +160,28 @@ func (i *CLI) Setup() (bool, error) {
 
 	ppc := &ProcessorPoolConfig{
 		Hostname: i.Config.Hostname,
-		Context:  ctx,
-
-		HardTimeout:             i.Config.HardTimeout,
-		InitialSleep:            i.Config.InitialSleep,
-		LogTimeout:              i.Config.LogTimeout,
-		MaxLogLength:            i.Config.MaxLogLength,
-		ScriptUploadTimeout:     i.Config.ScriptUploadTimeout,
-		StartupTimeout:          i.Config.StartupTimeout,
-		PayloadFilterExecutable: i.Config.PayloadFilterExecutable,
+		Context:  rootContext,
+		Config:   i.Config,
 	}
 
-	pool := NewProcessorPool(ppc, i.BackendProvider, i.BuildScriptGenerator, i.CancellationBroadcaster)
+	pool := NewProcessorPool(ppc, i.BackendProvider, i.BuildScriptGenerator, i.BuildTracePersister, i.CancellationBroadcaster)
 
-	pool.SkipShutdownOnLogTimeout = i.Config.SkipShutdownOnLogTimeout
 	logger.WithField("pool", pool).Debug("built")
 
 	i.ProcessorPool = pool
+
+	if i.c.String("remote-controller-addr") != "" {
+		if i.c.String("remote-controller-auth") != "" {
+			i.setupRemoteController()
+		} else {
+			i.logger.Info("skipping remote controller setup without remote-controller-auth set")
+		}
+		go func() {
+			httpAddr := i.c.String("remote-controller-addr")
+			i.logger.Info("listening at ", httpAddr)
+			http.ListenAndServe(httpAddr, nil)
+		}()
+	}
 
 	err = i.setupJobQueueAndCanceller()
 	if err != nil {
@@ -184,7 +189,7 @@ func (i *CLI) Setup() (bool, error) {
 		return false, err
 	}
 
-	err = i.setupLogsQueue()
+	err = i.setupLogWriterFactory()
 	if err != nil {
 		logger.WithField("err", err).Error("couldn't create logs queue")
 		return false, err
@@ -211,20 +216,20 @@ func (i *CLI) Run() {
 	go i.signalHandler()
 
 	i.logger.WithFields(logrus.Fields{
-		"pool_size":  i.Config.PoolSize,
-		"queue":      i.JobQueue,
-		"logs_queue": i.LogsQueue,
+		"pool_size":         i.Config.PoolSize,
+		"queue":             i.JobQueue,
+		"logwriter_factory": i.LogWriterFactory,
 	}).Debug("running pool")
 
-	i.ProcessorPool.Run(i.Config.PoolSize, i.JobQueue)
+	i.ProcessorPool.Run(i.Config.PoolSize, i.JobQueue, i.LogWriterFactory)
 
 	err := i.JobQueue.Cleanup()
 	if err != nil {
 		i.logger.WithField("err", err).Error("couldn't clean up job queue")
 	}
 
-	if i.LogsQueue != nil {
-		err := i.LogsQueue.Cleanup()
+	if i.LogWriterFactory != nil {
+		err := i.LogWriterFactory.Cleanup()
 		if err != nil {
 			i.logger.WithField("err", err).Error("couldn't clean up logs queue")
 		}
@@ -332,12 +337,93 @@ func (i *CLI) setupMetrics() {
 		go librato.Librato(metrics.DefaultRegistry, time.Minute,
 			i.Config.LibratoEmail, i.Config.LibratoToken, i.Config.LibratoSource,
 			[]float64{0.50, 0.75, 0.90, 0.95, 0.99, 0.999, 1.0}, time.Millisecond)
-	} else if !i.c.Bool("silence-metrics") {
+	}
+
+	if i.c.Bool("log-metrics") {
 		i.logger.Info("starting logger metrics reporter")
 
 		go metrics.Log(metrics.DefaultRegistry, time.Minute,
 			log.New(os.Stderr, "metrics: ", log.Lmicroseconds))
 	}
+}
+
+func loadStackdriverTraceJSON(ctx gocontext.Context, stackdriverTraceAccountJSON string) (*google.Credentials, error) {
+	if stackdriverTraceAccountJSON == "" {
+		creds, err := google.FindDefaultCredentials(ctx, googlecloudtrace.ScopeTraceAppend)
+		return creds, errors.Wrap(err, "could not build default client")
+	}
+
+	credBytes, err := loadBytes(stackdriverTraceAccountJSON)
+	if err != nil {
+		return nil, err
+	}
+
+	creds, err := google.CredentialsFromJSON(ctx, credBytes, googlecloudtrace.ScopeTraceAppend)
+	if err != nil {
+		return nil, err
+	}
+	return creds, nil
+}
+
+func loadBytes(filenameOrJSON string) ([]byte, error) {
+	var (
+		bytes []byte
+		err   error
+	)
+
+	if strings.HasPrefix(strings.TrimSpace(filenameOrJSON), "{") {
+		bytes = []byte(filenameOrJSON)
+	} else {
+		bytes, err = ioutil.ReadFile(filenameOrJSON)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return bytes, nil
+}
+
+func (i *CLI) setupOpenCensus(ctx gocontext.Context) error {
+	opencensusEnabled := i.Config.OpencensusTracingEnabled
+
+	if !opencensusEnabled {
+		return nil
+	}
+
+	creds, err := loadStackdriverTraceJSON(ctx, i.Config.StackdriverTraceAccountJSON)
+	if err != nil {
+		return err
+	}
+
+	sd, err := stackdriver.NewExporter(stackdriver.Options{
+		ProjectID: i.Config.StackdriverProjectID,
+		TraceClientOptions: []option.ClientOption{
+			option.WithCredentials(creds),
+		},
+		MonitoringClientOptions: []option.ClientOption{
+			option.WithCredentials(creds),
+		},
+	})
+
+	if err != nil {
+		return err
+	}
+
+	defer sd.Flush()
+
+	// Register/enable the trace exporter
+	trace.RegisterExporter(sd)
+
+	traceSampleRate := i.Config.OpencensusSamplingRate
+	if traceSampleRate <= 0 {
+		i.logger.WithFields(logrus.Fields{
+			"trace_sample_rate": traceSampleRate,
+		}).Error("trace sample rate must be positive")
+		return errors.New("invalid trace sample rate")
+	}
+
+	trace.ApplyConfig(trace.Config{DefaultSampler: trace.ProbabilitySampler(1.0 / float64(traceSampleRate))})
+	return nil
 }
 
 func (i *CLI) heartbeatHandler(heartbeatURL, heartbeatAuthToken string) {
@@ -402,102 +488,32 @@ func (i *CLI) heartbeatCheck(heartbeatURL, heartbeatAuthToken string) error {
 	return nil
 }
 
-func (i *CLI) setupHTTPAPI() {
-	i.logger.Info("setting up HTTP API")
-	http.HandleFunc("/worker", i.httpAPI)
-	http.HandleFunc("/worker/", i.httpAPI)
+func (i *CLI) setupRemoteController() {
+	i.logger.Info("setting up remote controller")
+	(&RemoteController{
+		pool:       i.ProcessorPool,
+		auth:       i.c.String("remote-controller-auth"),
+		workerInfo: i.workerInfo,
+		cancel:     i.cancel,
+	}).Setup()
 }
 
-func (i *CLI) httpAPI(w http.ResponseWriter, req *http.Request) {
-	if req.Method == "GET" && req.URL.Path == "/worker" {
-		w.Header().Set("Content-Type", "text/plain;charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, strings.TrimSpace(`
-Available methods:
-
-- POST /worker/graceful-shutdown
-- POST /worker/graceful-shutdown-pause
-- POST /worker/info
-- POST /worker/pool-decr
-- POST /worker/pool-incr
-- POST /worker/shutdown
-		`)+"\n")
-		return
+func (i *CLI) workerInfo() workerInfo {
+	info := workerInfo{
+		Version:          VersionString,
+		Revision:         RevisionString,
+		Generated:        GeneratedString,
+		Uptime:           time.Since(i.bootTime).String(),
+		PoolSize:         i.ProcessorPool.Size(),
+		ExpectedPoolSize: i.ProcessorPool.ExpectedSize(),
+		TotalProcessed:   i.ProcessorPool.TotalProcessed(),
 	}
 
-	if req.Method != "POST" {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
+	i.ProcessorPool.Each(func(_ int, p *Processor) {
+		info.Processors = append(info.Processors, p.processorInfo())
+	})
 
-	username, password, ok := req.BasicAuth()
-	if !ok {
-		w.Header().Set("WWW-Authenticate", "Basic realm=\"travis-ci/worker\"")
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-
-	authBytes := []byte(fmt.Sprintf("%s:%s", username, password))
-	if subtle.ConstantTimeCompare(authBytes, []byte(i.c.String("http-api-auth"))) != 1 {
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/plain;charset=utf-8")
-
-	action := strings.ToLower(strings.Replace(req.URL.Path, "/worker/", "", 1))
-	i.logger.Info(fmt.Sprintf("web %s received", action))
-	switch action {
-	case "graceful-shutdown":
-		i.ProcessorPool.GracefulShutdown(false)
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "starting graceful shutdown\n")
-	case "shutdown":
-		i.cancel()
-		fmt.Fprintf(w, "shutting down immediately\n")
-	case "pool-incr":
-		prev := i.ProcessorPool.Size()
-		i.ProcessorPool.Incr()
-		fmt.Fprintf(w, "adding processor to pool (%v + 1)\n", prev)
-	case "pool-decr":
-		prev := i.ProcessorPool.Size()
-		i.ProcessorPool.Decr()
-		fmt.Fprintf(w, "removing processor from pool (%v - 1)\n", prev)
-	case "graceful-shutdown-pause":
-		i.ProcessorPool.GracefulShutdown(true)
-		fmt.Fprintf(w, "toggling graceful shutdown and pause\n")
-	case "info":
-		fmt.Fprintf(w, "version: %s\n"+
-			"revision: %s\n"+
-			"generated: %s\n"+
-			"boot_time: %s\n"+
-			"uptime: %v\n"+
-			"pool_size: %v\n"+
-			"total_processed: %v\n"+
-			"processors:\n",
-			VersionString,
-			RevisionString,
-			GeneratedString,
-			i.bootTime.String(),
-			time.Since(i.bootTime),
-			i.ProcessorPool.Size(),
-			i.ProcessorPool.TotalProcessed())
-		i.ProcessorPool.Each(func(n int, proc *Processor) {
-			fmt.Fprintf(w, "- n: %v\n"+
-				"  id: %v\n"+
-				"  processed: %v\n"+
-				"  status: %v\n"+
-				"  last_job_id: %v\n",
-				n,
-				proc.ID,
-				proc.ProcessedCount,
-				proc.CurrentStatus,
-				proc.LastJobID)
-		})
-	default:
-		w.Header().Set("Travis-Worker-Unknown-Action", action)
-		w.WriteHeader(http.StatusNotFound)
-	}
+	return info
 }
 
 func (i *CLI) signalHandler() {
@@ -709,16 +725,20 @@ func (i *CLI) buildFileJobQueue() (*FileJobQueue, error) {
 	return jobQueue, nil
 }
 
-func (i *CLI) setupLogsQueue() error {
+func (i *CLI) setupLogWriterFactory() error {
 	if i.Config.LogsAmqpURI == "" {
 		// If no separate URI is set for LogsAMQP, use the JobsQueue to send log parts
 		return nil
 	}
-	err := i.buildAMQPLogsQueue()
-	return err
+	logWriterFactory, err := i.buildAMQPLogWriterFactory()
+	if err != nil {
+		return err
+	}
+	i.LogWriterFactory = logWriterFactory
+	return nil
 }
 
-func (i *CLI) buildAMQPLogsQueue() error {
+func (i *CLI) buildAMQPLogWriterFactory() (*AMQPLogWriterFactory, error) {
 	var amqpConn *amqp.Connection
 	var err error
 
@@ -731,11 +751,11 @@ func (i *CLI) buildAMQPLogsQueue() error {
 		if i.Config.LogsAmqpTlsCertPath != "" {
 			cert, err := ioutil.ReadFile(i.Config.LogsAmqpTlsCertPath)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			cfg.RootCAs.AppendCertsFromPEM(cert)
 		}
-		amqpConn, err = amqp.DialConfig(i.Config.AmqpURI,
+		amqpConn, err = amqp.DialConfig(i.Config.LogsAmqpURI,
 			amqp.Config{
 				Heartbeat:       i.Config.AmqpHeartbeat,
 				Locale:          "en_US",
@@ -743,14 +763,14 @@ func (i *CLI) buildAMQPLogsQueue() error {
 			})
 	} else if i.Config.AmqpInsecure {
 		amqpConn, err = amqp.DialConfig(
-			i.Config.AmqpURI,
+			i.Config.LogsAmqpURI,
 			amqp.Config{
 				Heartbeat:       i.Config.AmqpHeartbeat,
 				Locale:          "en_US",
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			})
 	} else {
-		amqpConn, err = amqp.DialConfig(i.Config.AmqpURI,
+		amqpConn, err = amqp.DialConfig(i.Config.LogsAmqpURI,
 			amqp.Config{
 				Heartbeat: i.Config.AmqpHeartbeat,
 				Locale:    "en_US",
@@ -758,12 +778,17 @@ func (i *CLI) buildAMQPLogsQueue() error {
 	}
 	if err != nil {
 		i.logger.WithField("err", err).Error("couldn't connect to the logs AMQP server")
-		return err
+		return nil, err
 	}
 
 	go i.amqpErrorWatcher(amqpConn)
 	i.logger.Debug("connected to the logs AMQP server")
-	return nil
+
+	logWriterFactory, err := NewAMQPLogWriterFactory(amqpConn, i.Config.RabbitMQSharding)
+	if err != nil {
+		return nil, err
+	}
+	return logWriterFactory, nil
 }
 
 func (i *CLI) amqpErrorWatcher(amqpConn *amqp.Connection) {

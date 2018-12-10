@@ -16,23 +16,28 @@ import (
 )
 
 type amqpLogPart struct {
-	JobID   uint64 `json:"id"`
-	Content string `json:"log"`
-	Number  int    `json:"number"`
-	UUID    string `json:"uuid"`
-	Final   bool   `json:"final"`
+	JobID   uint64          `json:"id"`
+	Content string          `json:"log"`
+	Number  int             `json:"number"`
+	UUID    string          `json:"uuid"`
+	Final   bool            `json:"final"`
+	Meta    *JobStartedMeta `json:"meta,omitempty"`
 }
 
 type amqpLogWriter struct {
 	ctx     gocontext.Context
+	cancel  gocontext.CancelFunc
 	jobID   uint64
 	sharded bool
 
 	closeChan chan struct{}
 
-	bufferMutex   sync.Mutex
-	buffer        *bytes.Buffer
-	logPartNumber int
+	bufferMutex      sync.Mutex
+	buffer           *bytes.Buffer
+	logPartNumber    int
+	jobStarted       bool
+	jobStartedMeta   *JobStartedMeta
+	maxLengthReached bool
 
 	bytesWritten int
 	maxLength    int
@@ -45,7 +50,6 @@ type amqpLogWriter struct {
 }
 
 func newAMQPLogWriter(ctx gocontext.Context, logWriterChan *amqp.Channel, jobID uint64, timeout time.Duration, sharded bool) (*amqpLogWriter, error) {
-
 	writer := &amqpLogWriter{
 		ctx:       context.FromComponent(ctx, "log_writer"),
 		amqpChan:  logWriterChan,
@@ -86,11 +90,14 @@ func (w *amqpLogWriter) Write(p []byte) (int, error) {
 
 	w.bytesWritten += len(p)
 	if w.bytesWritten > w.maxLength {
-		_, err := w.WriteAndClose([]byte(fmt.Sprintf("\n\nThe log length has exceeded the limit of %d MB (this usually means that the test suite is raising the same exception over and over).\n\nThe job has been terminated\n", w.maxLength/1000/1000)))
-		if err != nil {
-			logger.WithField("err", err).Error("couldn't write 'log length exceeded' error message to log")
+		logger.Info("wrote past maximum log length - cancelling context")
+		w.maxLengthReached = true
+		if w.cancel == nil {
+			logger.Error("cancel function does not exist")
+		} else {
+			w.cancel()
 		}
-		return 0, ErrWrotePastMaxLogLength
+		return 0, nil
 	}
 
 	w.bufferMutex.Lock()
@@ -125,6 +132,19 @@ func (w *amqpLogWriter) Timeout() <-chan time.Time {
 
 func (w *amqpLogWriter) SetMaxLogLength(bytes int) {
 	w.maxLength = bytes
+}
+
+func (w *amqpLogWriter) SetJobStarted(meta *JobStartedMeta) {
+	w.jobStarted = true
+	w.jobStartedMeta = meta
+}
+
+func (w *amqpLogWriter) SetCancelFunc(cancel gocontext.CancelFunc) {
+	w.cancel = cancel
+}
+
+func (w *amqpLogWriter) MaxLengthReached() bool {
+	return w.maxLengthReached == true
 }
 
 // WriteAndClose works like a Write followed by a Close, but ensures that no
@@ -183,6 +203,8 @@ func (w *amqpLogWriter) flushRegularly(ctx gocontext.Context) {
 }
 
 func (w *amqpLogWriter) flush() {
+	w.bufferMutex.Lock()
+	defer w.bufferMutex.Unlock()
 	if w.buffer.Len() <= 0 {
 		return
 	}
@@ -194,9 +216,7 @@ func (w *amqpLogWriter) flush() {
 	})
 
 	for w.buffer.Len() > 0 {
-		w.bufferMutex.Lock()
 		n, err := w.buffer.Read(buf)
-		w.bufferMutex.Unlock()
 		if err != nil {
 			// According to documentation, err should only be non-nil if
 			// there's no data in the buffer. We've checked for this, so
@@ -221,6 +241,15 @@ func (w *amqpLogWriter) flush() {
 
 func (w *amqpLogWriter) publishLogPart(part amqpLogPart) error {
 	part.UUID, _ = context.UUIDFromContext(w.ctx)
+
+	// we emit the queued_at field on the log part to indicate that
+	// this is when the job started running. downstream consumers of
+	// the log parts (travis-logs) can then use the timestamp to compute
+	// a "time to first log line" metric.
+	if w.jobStarted {
+		part.Meta = w.jobStartedMeta
+		w.jobStarted = false
+	}
 
 	partBody, err := json.Marshal(part)
 	if err != nil {

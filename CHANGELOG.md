@@ -7,14 +7,195 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/).
 ### Added
 
 ### Changed
+- ratelimit: trace redis connection pool checkout
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+- backend/gce: add missing rate limit calls
 
 ### Security
+
+## [5.1.0] - 2018-11-23
+
+### Added
+- ratelimit: dynamic configuration of `max_calls` and `duration` via redis
+
+### Fixed
+- backend/gce: gets zone information from warmer in order to delete instances successfully
+
+## [5.0.0] - 2018-11-15
+
+### Added
+- backend/gce: cache gce api calls for image and machine type, reduce total api call volume
+
+### Removed
+- backend/cloudbrain: the cloudbrain backend is not being used, so we are removing it
+
+### Fixed
+- ssh: store exit code in int32 instead of uint8
+
+## [4.6.3] - 2018-11-13
+
+### Changed
+- processor: include state, requeue, err in "finished job" log message
+- trace: include return code for start_instance, upload_script, run_script, download_trace steps
+- trace: instrument CLI.Setup in order to avoid orphaned spans
+- backend/gce: track rate of rate limit start calls (number of gce api calls we would make without rate limiting)
+
+### Fixed
+- trace:
+    * fixed child span rendering for time.Sleep
+
+## [4.6.2] - 2018-11-02
+
+### Added
+- trace:
+    * backend/gce: calls to `time.Sleep`
+
+### Changed
+- backend/gce: track `worker.google.compute.api.client` metric for rate of calls to gce api
+
+## [4.6.1] - 2018-10-30
+
+### Changed
+- backend/docker: additional support for additional env vars `HTTPS_PROXY`, `FTP_PROXY`, `NO_PROXY`
+
+## [4.6.0] - 2018-10-30
+
+### Added
+- backend/docker: support for setting `HTTP_PROXY` variable in jobs
+
+### Changed
+- trace:
+    * image/: selector, api_selector, env_selector for all backends
+    * backend/gce: calls to google cloud API
+
+## [4.5.2] - 2018-10-24
+
+### Changed
+- trace: expanded set of trace functions for stackdriver trace
+    * ratelimit (redis and GCE API rate limiting)
+    * backend/gce
+    * amqp_job
+- google: support loading default credentials
+- processor: log image name in job finished summary
+
+## [4.5.1] - 2018-10-17
+
+### Added
+- processor: track cumulative per-job timings
+
+### Changed
+- build: update all dependencies, build binaries via go 1.11.1
+- backend/gce: propagate warmed instance name and ip correctly
+
+## [4.5.0] - 2018-10-12
+
+### Added
+- trace: opencensus stackdriver trace for worker
+- backend/gce: preliminary support for obtaining pre-warmed instances from the warmer service
+
+## [4.4.0] - 2018-10-05
+
+### Added
+- trace: build.sh trace download support for jupiterbrain backend
+
+### Changed
+- config: refactor config propagation to pass config struct directly
+
+## [4.3.0] - 2018-10-03
+
+### Changed
+- amqp_log_writer: propagate more job metadata with "time to first log line" event
+
+### Fixed
+- progress: omit text progress folds when progress type is not "text"
+
+## [4.2.0] - 2018-10-01
+
+### Changed
+- config: replace `silence-metrics` option with `log-metrics`, changing log metrics from opt-out to opt-in
+- backend/gce: support start attributes with `OS` value of `"windows"`
+
+## [4.1.2] - 2018-09-13
+
+### Fixed
+- step-run-script: take into account custom job timeouts when checking for hard timeout
+
+## [4.1.1] - 2018-09-13
+
+### Added
+- trace: build.sh trace download support for docker backend
+
+### Fixed
+- step-run-script: fix job termination in case of log maxsize or hard timeout
+- gce: ensure correct ssh permissions on build vms
+- gce: fix build instance on context timeout
+
+## [4.1.0] - 2018-08-30
+
+### Added
+- backend/jupiterbrain: override for CPU count and RAM in created instances
+
+### Changed
+- trace: guard trace download step on the trace flag from the payload
+- trace: propagate the trace flag in state update message
+- processor: log duration of job execution
+- amqp_log_writer: tag first log line with queued_at timestamp for "time to first log line" metric
+
+### Fixed
+- backend/gce: fixed host maintenance behaviour when preemptible flag is enabled
+
+## [4.0.1] - 2018-08-22
+
+### Added
+- backend/gce: build.sh trace persisting
+- backend/gce: make migration behavior on host maintenance events conditional on GPU usage
+
+## [4.0.0] - 2018-07-23
+
+### Added
+- amqp_log_writer: support separate AMQP connection for log writing
+
+### Changed
+- build: update all dependencies, build binaries via go 1.10.3
+- development: move tooling dependencies into the `deps` target
+- backend/gce: specify `"TERMINATE"` on host maintenance
+- processor: signature of `NewProcessor` to allow for log writer factory
+    injection
+
+### Fixed
+- backend/gce: use consistent zone value
+
+## [3.12.0] - 2018-07-18
+
+### Added
+- backend/docker: support for env-based image selection
+- processor: log entries recording time delta since start of processing
+
+## [3.11.0] - 2018-07-12
+
+### Added
+- backend/gce, backend/jupiterbrain: incremental progress reporting during
+    instance startup
+
+## [3.10.1] - 2018-07-06
+
+### Fixed
+- backend/gce: use default disk type when no zone is given via VM config
+
+## [3.10.0] - 2018-07-03
+
+### Added
+- backend/gce: support for GPU allocation via VM config
+
+## [3.9.0] - 2018-07-02
+
+### Added
+- support for a sharded logs queue (using the rabbitmq-sharding plugin)
 
 ## [3.8.2] - 2018-06-21
 
@@ -34,7 +215,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/).
 - Makefile: log output from building or running the tests is now less verbose
 
 ### Fixed
-- backend/docker_test: check for EOF instead of Nil for archive/tar errors 
+- backend/docker_test: check for EOF instead of Nil for archive/tar errors
 
 ## [3.8.0] - 2018-05-31
 
@@ -697,7 +878,29 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/).
 ### Added
 - Initial release
 
-[Unreleased]: https://github.com/travis-ci/worker/compare/v3.8.2...HEAD
+[Unreleased]: https://github.com/travis-ci/worker/compare/v5.1.0...HEAD
+[5.1.0]: https://github.com/travis-ci/worker/compare/v5.0.0...v5.1.0
+[5.0.0]: https://github.com/travis-ci/worker/compare/v4.6.3...v5.0.0
+[4.6.3]: https://github.com/travis-ci/worker/compare/v4.6.2...v4.6.3
+[4.6.2]: https://github.com/travis-ci/worker/compare/v4.6.1...v4.6.2
+[4.6.1]: https://github.com/travis-ci/worker/compare/v4.6.0...v4.6.1
+[4.6.0]: https://github.com/travis-ci/worker/compare/v4.5.2...v4.6.0
+[4.5.2]: https://github.com/travis-ci/worker/compare/v4.5.1...v4.5.2
+[4.5.1]: https://github.com/travis-ci/worker/compare/v4.5.0...v4.5.1
+[4.5.0]: https://github.com/travis-ci/worker/compare/v4.4.0...v4.5.0
+[4.4.0]: https://github.com/travis-ci/worker/compare/v4.3.0...v4.4.0
+[4.3.0]: https://github.com/travis-ci/worker/compare/v4.2.0...v4.3.0
+[4.2.0]: https://github.com/travis-ci/worker/compare/v4.1.2...v4.2.0
+[4.1.2]: https://github.com/travis-ci/worker/compare/v4.1.1...v4.1.2
+[4.1.1]: https://github.com/travis-ci/worker/compare/v4.1.0...v4.1.1
+[4.1.0]: https://github.com/travis-ci/worker/compare/v4.0.1...v4.1.0
+[4.0.1]: https://github.com/travis-ci/worker/compare/v4.0.0...v4.0.1
+[4.0.0]: https://github.com/travis-ci/worker/compare/v3.12.0...v4.0.0
+[3.12.0]: https://github.com/travis-ci/worker/compare/v3.11.0...v3.12.0
+[3.11.0]: https://github.com/travis-ci/worker/compare/v3.10.1...v3.11.0
+[3.10.1]: https://github.com/travis-ci/worker/compare/v3.10.0...v3.10.1
+[3.10.0]: https://github.com/travis-ci/worker/compare/v3.9.0...v3.10.0
+[3.9.0]: https://github.com/travis-ci/worker/compare/v3.8.2...v3.9.0
 [3.8.2]: https://github.com/travis-ci/worker/compare/v3.8.1...v3.8.2
 [3.8.1]: https://github.com/travis-ci/worker/compare/v3.8.0...v3.8.1
 [3.8.0]: https://github.com/travis-ci/worker/compare/v3.7.0...v3.8.0

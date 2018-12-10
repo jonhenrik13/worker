@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -61,7 +62,7 @@ var (
 		"NATIVE":              "upload and run build script via docker API instead of over ssh (default false)",
 		"PRIVILEGED":          "run containers in privileged mode (default false)",
 		"SSH_DIAL_TIMEOUT":    fmt.Sprintf("connection timeout for ssh connections (default %v)", defaultDockerSSHDialTimeout),
-		"IMAGE_SELECTOR_TYPE": fmt.Sprintf("image selector type (\"tag\" or \"api\", default %q)", defaultDockerImageSelectorType),
+		"IMAGE_SELECTOR_TYPE": fmt.Sprintf("image selector type (\"tag\", \"api\", or \"env\", default %q)", defaultDockerImageSelectorType),
 		"IMAGE_SELECTOR_URL":  "URL for image selector API, used only when image selector is \"api\"",
 		"BINDS":               "Bind mount a volume (example: \"/var/run/docker.sock:/var/run/docker.sock\", default \"\")",
 	}
@@ -98,6 +99,8 @@ type dockerProvider struct {
 	tmpFs           map[string]string
 	imageSelector   image.Selector
 	containerLabels map[string]string
+
+	httpProxy, httpsProxy, ftpProxy, noProxy string
 
 	cpuSetsMutex sync.Mutex
 	cpuSets      []bool
@@ -228,10 +231,6 @@ func newDockerProvider(cfg *config.ProviderConfig) (Provider, error) {
 		imageSelectorType = cfg.Get("IMAGE_SELECTOR_TYPE")
 	}
 
-	if imageSelectorType != "tag" && imageSelectorType != "api" {
-		return nil, fmt.Errorf("invalid image selector type %q", imageSelectorType)
-	}
-
 	imageSelector, err := buildDockerImageSelector(imageSelectorType, client, cfg)
 	if err != nil {
 		return nil, errors.Wrap(err, "couldn't build docker image selector")
@@ -241,6 +240,11 @@ func newDockerProvider(cfg *config.ProviderConfig) (Provider, error) {
 	if cfg.IsSet("CONTAINER_LABELS") {
 		containerLabels = str2map(cfg.Get("CONTAINER_LABELS"))
 	}
+
+	httpProxy := cfg.Get("HTTP_PROXY")
+	httpsProxy := cfg.Get("HTTPS_PROXY")
+	ftpProxy := cfg.Get("FTP_PROXY")
+	noProxy := cfg.Get("NO_PROXY")
 
 	return &dockerProvider{
 		client:         client,
@@ -256,6 +260,11 @@ func newDockerProvider(cfg *config.ProviderConfig) (Provider, error) {
 		runNative:       runNative,
 		imageSelector:   imageSelector,
 		containerLabels: containerLabels,
+
+		httpProxy:  httpProxy,
+		httpsProxy: httpsProxy,
+		ftpProxy:   ftpProxy,
+		noProxy:    noProxy,
 
 		execCmd:         execCmd,
 		inspectInterval: inspectInterval,
@@ -312,6 +321,8 @@ func buildDockerImageSelector(selectorType string, client *docker.Client, cfg *c
 	switch selectorType {
 	case "tag":
 		return &dockerTagImageSelector{client: client}, nil
+	case "env":
+		return image.NewEnvSelector(cfg)
 	case "api":
 		baseURL, err := url.Parse(cfg.Get("IMAGE_SELECTOR_URL"))
 		if err != nil {
@@ -342,6 +353,14 @@ func (p *dockerProvider) dockerImageNameForID(ctx gocontext.Context, imageID str
 	return imageID
 }
 
+func (p *dockerProvider) SupportsProgress() bool {
+	return false
+}
+
+func (p *dockerProvider) StartWithProgress(ctx gocontext.Context, startAttributes *StartAttributes, _ Progresser) (Instance, error) {
+	return p.Start(ctx, startAttributes)
+}
+
 func (p *dockerProvider) Start(ctx gocontext.Context, startAttributes *StartAttributes) (Instance, error) {
 	var (
 		imageID   string
@@ -353,7 +372,7 @@ func (p *dockerProvider) Start(ctx gocontext.Context, startAttributes *StartAttr
 	if startAttributes.ImageName != "" {
 		imageName = startAttributes.ImageName
 	} else {
-		selectedImageID, err := p.imageSelector.Select(&image.Params{
+		selectedImageID, err := p.imageSelector.Select(ctx, &image.Params{
 			Language: startAttributes.Language,
 			Infra:    "docker",
 		})
@@ -586,6 +605,14 @@ func (i *dockerInstance) sshConnection(ctx gocontext.Context) (ssh.Connection, e
 	return i.provider.sshDialer.Dial(fmt.Sprintf("%s:22", i.container.NetworkSettings.IPAddress), "travis", i.provider.sshDialTimeout)
 }
 
+func (i *dockerInstance) Warmed() bool {
+	return false
+}
+
+func (i *dockerInstance) SupportsProgress() bool {
+	return false
+}
+
 func (i *dockerInstance) UploadScript(ctx gocontext.Context, script []byte) error {
 	if i.runNative {
 		return i.uploadScriptNative(ctx, script)
@@ -652,6 +679,24 @@ func (i *dockerInstance) runScriptExec(ctx gocontext.Context, output io.Writer) 
 		Cmd:          i.provider.execCmd,
 		User:         "travis",
 	}
+
+	if i.provider.httpProxy != "" {
+		execConfig.Env = append(execConfig.Env, "HTTP_PROXY="+i.provider.httpProxy)
+		execConfig.Env = append(execConfig.Env, "http_proxy="+i.provider.httpProxy)
+	}
+	if i.provider.httpsProxy != "" {
+		execConfig.Env = append(execConfig.Env, "HTTPS_PROXY="+i.provider.httpsProxy)
+		execConfig.Env = append(execConfig.Env, "https_proxy="+i.provider.httpsProxy)
+	}
+	if i.provider.ftpProxy != "" {
+		execConfig.Env = append(execConfig.Env, "FTP_PROXY="+i.provider.ftpProxy)
+		execConfig.Env = append(execConfig.Env, "ftp_proxy="+i.provider.ftpProxy)
+	}
+	if i.provider.noProxy != "" {
+		execConfig.Env = append(execConfig.Env, "NO_PROXY="+i.provider.noProxy)
+		execConfig.Env = append(execConfig.Env, "no_proxy="+i.provider.noProxy)
+	}
+
 	exec, err := i.client.ContainerExecCreate(ctx, i.container.ID, execConfig)
 	if err != nil {
 		return &RunResult{Completed: false}, err
@@ -694,7 +739,7 @@ func (i *dockerInstance) runScriptExec(ctx gocontext.Context, output io.Writer) 
 		}
 
 		if !inspect.Running {
-			return &RunResult{Completed: true, ExitCode: uint8(inspect.ExitCode)}, nil
+			return &RunResult{Completed: true, ExitCode: int32(inspect.ExitCode)}, nil
 		}
 
 		select {
@@ -716,6 +761,67 @@ func (i *dockerInstance) runScriptSSH(ctx gocontext.Context, output io.Writer) (
 	exitStatus, err := conn.RunCommand(strings.Join(i.provider.execCmd, " "), output)
 
 	return &RunResult{Completed: err != nil, ExitCode: exitStatus}, errors.Wrap(err, "error running script")
+}
+
+func (i *dockerInstance) DownloadTrace(ctx gocontext.Context) ([]byte, error) {
+	if i.runNative {
+		return i.downloadTraceNative(ctx)
+	}
+	return i.downloadTraceSSH(ctx)
+}
+
+func (i *dockerInstance) downloadTraceNative(ctx gocontext.Context) ([]byte, error) {
+	r, _, err := i.client.CopyFromContainer(ctx, i.container.ID, "/tmp/build.trace")
+	if r != nil {
+		defer r.Close()
+	}
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't copy trace from container")
+	}
+
+	found := false
+
+	tr := tar.NewReader(r)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, errors.Wrap(err, "couldn't parse tar")
+		}
+
+		if hdr.Name == "build.trace" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return nil, errors.Wrap(err, "couldn't find trace in tar")
+	}
+
+	buf, err := ioutil.ReadAll(tr)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't read contents of file")
+	}
+
+	return buf, nil
+}
+
+func (i *dockerInstance) downloadTraceSSH(ctx gocontext.Context) ([]byte, error) {
+	conn, err := i.sshConnection(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't connect to SSH server")
+	}
+	defer conn.Close()
+
+	buf, err := conn.DownloadFile("/tmp/build.trace")
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't download trace")
+	}
+
+	return buf, nil
 }
 
 func (i *dockerInstance) Stop(ctx gocontext.Context) error {
@@ -760,8 +866,8 @@ func (i *dockerInstance) StartupDuration() time.Duration {
 	return i.startBooting.Sub(containerCreated)
 }
 
-func (s *dockerTagImageSelector) Select(params *image.Params) (string, error) {
-	images, err := s.client.ImageList(gocontext.TODO(), dockertypes.ImageListOptions{All: true})
+func (s *dockerTagImageSelector) Select(ctx gocontext.Context, params *image.Params) (string, error) {
+	images, err := s.client.ImageList(ctx, dockertypes.ImageListOptions{All: true})
 	if err != nil {
 		return "", errors.Wrap(err, "failed to list docker images")
 	}

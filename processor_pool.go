@@ -5,13 +5,14 @@ import (
 	"os"
 	"sort"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	gocontext "context"
 
 	"github.com/pborman/uuid"
 	"github.com/sirupsen/logrus"
 	"github.com/travis-ci/worker/backend"
+	"github.com/travis-ci/worker/config"
 	"github.com/travis-ci/worker/context"
 )
 
@@ -21,54 +22,46 @@ type ProcessorPool struct {
 	Context                 gocontext.Context
 	Provider                backend.Provider
 	Generator               BuildScriptGenerator
+	Persister               BuildTracePersister
 	CancellationBroadcaster *CancellationBroadcaster
 	Hostname                string
+	Config                  *config.Config
 
-	HardTimeout, InitialSleep, LogTimeout, ScriptUploadTimeout, StartupTimeout time.Duration
-	MaxLogLength                                                               int
+	queue            JobQueue
+	logWriterFactory LogWriterFactory
+	poolErrors       []error
+	processorsLock   sync.Mutex
+	processors       []*Processor
+	processorsWG     sync.WaitGroup
+	pauseCount       int
 
-	PayloadFilterExecutable string
-
-	SkipShutdownOnLogTimeout bool
-
-	queue          JobQueue
-	poolErrors     []error
-	processorsLock sync.Mutex
-	processors     []*Processor
-	processorsWG   sync.WaitGroup
-	pauseCount     int
+	activeProcessorCount  int32
+	firstProcessorStarted chan struct{}
+	startProcessorOnce    sync.Once
 }
 
 type ProcessorPoolConfig struct {
 	Hostname string
 	Context  gocontext.Context
-
-	HardTimeout, InitialSleep, LogTimeout, ScriptUploadTimeout, StartupTimeout time.Duration
-	MaxLogLength                                                               int
-
-	PayloadFilterExecutable string
+	Config   *config.Config
 }
 
 // NewProcessorPool creates a new processor pool using the given arguments.
 func NewProcessorPool(ppc *ProcessorPoolConfig,
-	provider backend.Provider, generator BuildScriptGenerator,
+	provider backend.Provider, generator BuildScriptGenerator, persister BuildTracePersister,
 	cancellationBroadcaster *CancellationBroadcaster) *ProcessorPool {
 
 	return &ProcessorPool{
 		Hostname: ppc.Hostname,
 		Context:  ppc.Context,
-
-		HardTimeout:         ppc.HardTimeout,
-		InitialSleep:        ppc.InitialSleep,
-		LogTimeout:          ppc.LogTimeout,
-		ScriptUploadTimeout: ppc.ScriptUploadTimeout,
-		StartupTimeout:      ppc.StartupTimeout,
-		MaxLogLength:        ppc.MaxLogLength,
+		Config:   ppc.Config,
 
 		Provider:                provider,
 		Generator:               generator,
+		Persister:               persister,
 		CancellationBroadcaster: cancellationBroadcaster,
-		PayloadFilterExecutable: ppc.PayloadFilterExecutable,
+
+		firstProcessorStarted: make(chan struct{}),
 	}
 }
 
@@ -91,8 +84,47 @@ func (p *ProcessorPool) Each(f func(int, *Processor)) {
 	}
 }
 
-// Size returns the number of processors in the pool
+// Size returns the number of processors that are currently running.
+//
+// This includes processors that are in the process of gracefully shutting down. It's
+// important to track these because they are still running jobs and thus still using
+// resources that need to be managed and tracked.
 func (p *ProcessorPool) Size() int {
+	val := atomic.LoadInt32(&p.activeProcessorCount)
+	return int(val)
+}
+
+// SetSize adjust the pool to run the given number of processors.
+//
+// This operates in an eventually consistent manner. Because some workers may be
+// running jobs, we may not be able to immediately adjust the pool size. Once jobs
+// finish, the pool size should rest at the given value.
+func (p *ProcessorPool) SetSize(newSize int) {
+	p.processorsLock.Lock()
+	defer p.processorsLock.Unlock()
+
+	cur := len(p.processors)
+
+	if newSize > cur {
+		diff := newSize - cur
+		for i := 0; i < diff; i++ {
+			p.Incr()
+		}
+	} else if newSize < cur {
+		diff := cur - newSize
+		for i := 0; i < diff; i++ {
+			p.Decr()
+		}
+	}
+}
+
+// ExpectedSize returns the size of the pool once gracefully shutdown processors
+// complete.
+//
+// After calling SetSize, ExpectedSize will soon reflect the requested new size,
+// while Size will include processors that are still processing their last job
+// before shutting down.
+func (p *ProcessorPool) ExpectedSize() int {
 	return len(p.processors)
 }
 
@@ -107,13 +139,16 @@ func (p *ProcessorPool) TotalProcessed() int {
 
 // Run starts up a number of processors and connects them to the given queue.
 // This method stalls until all processors have finished.
-func (p *ProcessorPool) Run(poolSize int, queue JobQueue) error {
+func (p *ProcessorPool) Run(poolSize int, queue JobQueue, logWriterFactory LogWriterFactory) error {
 	p.queue = queue
+	p.logWriterFactory = logWriterFactory
 	p.poolErrors = []error{}
 
 	for i := 0; i < poolSize; i++ {
 		p.Incr()
 	}
+
+	p.waitForFirstProcessor()
 
 	if len(p.poolErrors) > 0 {
 		context.LoggerFromContext(p.Context).WithFields(logrus.Fields{
@@ -149,8 +184,10 @@ func (p *ProcessorPool) GracefulShutdown(togglePause bool) {
 		}
 	}
 
-	for _, processor := range p.processors {
-		processor.GracefulShutdown()
+	ps := len(p.processors)
+	for i := 0; i < ps; i++ {
+		// Use Decr to make sure the processor is removed from the list in the pool
+		p.Decr()
 	}
 }
 
@@ -159,12 +196,16 @@ func (p *ProcessorPool) Incr() {
 	p.processorsWG.Add(1)
 	go func() {
 		defer p.processorsWG.Done()
-		err := p.runProcessor(p.queue)
+		err := p.runProcessor(p.queue, p.logWriterFactory)
 		if err != nil {
 			p.poolErrors = append(p.poolErrors, err)
 			return
 		}
 	}()
+
+	p.startProcessorOnce.Do(func() {
+		close(p.firstProcessorStarted)
+	})
 }
 
 // Decr pops a processor out of the pool and issues a graceful shutdown
@@ -178,21 +219,15 @@ func (p *ProcessorPool) Decr() {
 	proc.GracefulShutdown()
 }
 
-func (p *ProcessorPool) runProcessor(queue JobQueue) error {
+func (p *ProcessorPool) runProcessor(queue JobQueue, logWriterFactory LogWriterFactory) error {
 	processorUUID := uuid.NewRandom()
 	processorID := fmt.Sprintf("%s@%d.%s", processorUUID.String(), os.Getpid(), p.Hostname)
 	ctx := context.FromProcessor(p.Context, processorID)
 
 	proc, err := NewProcessor(ctx, p.Hostname,
-		queue, p.Provider, p.Generator, p.CancellationBroadcaster,
+		queue, logWriterFactory, p.Provider, p.Generator, p.Persister, p.CancellationBroadcaster,
 		ProcessorConfig{
-			HardTimeout:             p.HardTimeout,
-			InitialSleep:            p.InitialSleep,
-			LogTimeout:              p.LogTimeout,
-			MaxLogLength:            p.MaxLogLength,
-			ScriptUploadTimeout:     p.ScriptUploadTimeout,
-			StartupTimeout:          p.StartupTimeout,
-			PayloadFilterExecutable: p.PayloadFilterExecutable,
+			Config: p.Config,
 		})
 
 	if err != nil {
@@ -203,12 +238,18 @@ func (p *ProcessorPool) runProcessor(queue JobQueue) error {
 		return err
 	}
 
-	proc.SkipShutdownOnLogTimeout = p.SkipShutdownOnLogTimeout
-
 	p.processorsLock.Lock()
 	p.processors = append(p.processors, proc)
 	p.processorsLock.Unlock()
 
+	atomic.AddInt32(&p.activeProcessorCount, 1)
 	proc.Run()
+	atomic.AddInt32(&p.activeProcessorCount, -1)
 	return nil
+}
+
+func (p *ProcessorPool) waitForFirstProcessor() {
+	// wait until this channel is closed. the first processor to start running
+	// will close it.
+	<-p.firstProcessorStarted
 }

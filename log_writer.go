@@ -1,9 +1,10 @@
 package worker
 
 import (
-	"errors"
 	"io"
 	"time"
+
+	gocontext "context"
 )
 
 var (
@@ -30,11 +31,16 @@ var (
 	// out the worst-case logs to be quite unlikely, so I'm willing to live
 	// with that. --Sarah
 	LogChunkSize = 1653
-
-	// ErrWrotePastMaxLogLength is returned by LogWriter.Write if the write
-	// caused the number of written bytes to go over the maximum log length.
-	ErrWrotePastMaxLogLength = errors.New("wrote past max length")
 )
+
+// JobStartedMeta is metadata that is useful for computing time to first
+// log line downstream, and breaking it down into further dimensions.
+type JobStartedMeta struct {
+	QueuedAt *time.Time `json:"queued_at"`
+	Repo     string     `json:"repo"`
+	Queue    string     `json:"queue"`
+	Infra    string     `json:"infra"`
+}
 
 // LogWriter is primarily an io.Writer that will send all bytes to travis-logs
 // for processing, and also has some utility methods for timeouts and log length
@@ -45,4 +51,7 @@ type LogWriter interface {
 	WriteAndClose([]byte) (int, error)
 	Timeout() <-chan time.Time
 	SetMaxLogLength(int)
+	SetJobStarted(meta *JobStartedMeta)
+	SetCancelFunc(gocontext.CancelFunc)
+	MaxLengthReached() bool
 }
