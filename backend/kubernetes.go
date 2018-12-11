@@ -200,6 +200,22 @@ func buildKubernetesImageSelector(selectorType string, cfg *config.ProviderConfi
 	}
 }
 
+func (p *kubernetesProvider) StartWithProgress(ctx gocontext.Context, startAttributes *StartAttributes, progresser Progresser) (Instance, error) {
+	return nil, nil
+}
+
+func (p *kubernetesProvider) SupportsProgress() bool {
+	return false
+}
+
+func (i *kubernetesInstance) SupportsProgress() bool {
+	return false
+}
+
+func (i *kubernetesInstance) Warmed() bool {
+	return false
+}
+
 func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *StartAttributes) (Instance, error) {
 	var (
 		dur time.Duration
@@ -208,7 +224,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
 
-	selectedImageID, err := p.imageSelector.Select(&image.Params{
+	selectedImageID, err := p.imageSelector.Select(ctx, &image.Params{
 		Language: startAttributes.Language,
 		Infra:    "kubernetes",
 	})
@@ -429,9 +445,9 @@ func (i *kubernetesInstance) runScriptExec(ctx gocontext.Context, output io.Writ
 	command := []string{"su", "-c", "/home/travis/build.sh", "-", "travis"}
 	err := i.execute(command, nil, output, output)
 
-	exitCode := uint8(0)
+	exitCode := int32(0)
 	if err != nil {
-		exitCode = uint8(1)
+		exitCode = int32(1)
 	}
 
 	return &RunResult{Completed: err != nil, ExitCode: exitCode}, errors.Wrap(err, "error running script")
@@ -495,6 +511,10 @@ func (i *kubernetesInstance) Stop(ctx gocontext.Context) error {
 		return err
 
 	}
+}
+
+func (i *kubernetesInstance) DownloadTrace(ctx gocontext.Context) ([]byte, error) {
+	return nil, nil
 }
 
 func (p *kubernetesProvider) deletePod(hostname string) error {
