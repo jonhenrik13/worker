@@ -41,21 +41,6 @@ import (
 	// _ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 )
 
-func init() {
-	Register("kubernetes", "Kubernetes", map[string]string{
-		"REGISTRY_HOSTNAME": "Docker registry hostname",
-		"REGISTRY_EMAIL":    "Email address for docker registry",
-		"REGISTRY_LOGIN":    "Username for docker registry",
-		"REGISTRY_PASSWORD": "Password for docker registry",
-		"NAMESPACE":         "Kubernetes namespace to use for deploys",
-		"KUBECONFIG_PATH":   "Path to kubeconfig file",
-		"REQUESTS_CPU":      "How much CPU resources containers in the pod should request",
-		"REQUESTS_MEM":      "How much memory containers in the pod should request",
-		"LIMITS_CPU":        "How much CPU resources containers in the pod should be limited to",
-		"LIMITS_MEM":        "How much memory containers in the pod should be limited to",
-	}, newKubernetesProvider)
-}
-
 const imageSelectAPI = "api"
 const imageSelectEnv = "env"
 
@@ -64,12 +49,32 @@ var (
 	defaultDockerCfgSecretName         = "travis-docker-registry"
 	defaultDockerRegistryHostName      = "index.docker.io"
 	defaultKubernetesNamespace         = "default"
-	defaultKubernetesImageSelectorType = "env"
+	defaultKubernetesImageSelectorType = imageSelectEnv
 	defaultKubernetesPodTermGrace      = 1
+	defaultKubernetesImage             = "travisci/ci-garnet:packer-1515445631-7dfb2e1"
 )
 
+func init() {
+	Register("kubernetes", "Kubernetes", map[string]string{
+		"REGISTRY_HOSTNAME":     "Docker registry hostname",
+		"REGISTRY_EMAIL":        "Email address for docker registry",
+		"REGISTRY_LOGIN":        "Username for docker registry",
+		"REGISTRY_PASSWORD":     "Password for docker registry",
+		"NAMESPACE":             "Kubernetes namespace to use for deploys",
+		"KUBECONFIG_PATH":       "Path to kubeconfig file",
+		"REQUESTS_CPU":          "How much CPU resources containers in the pod should request",
+		"REQUESTS_MEM":          "How much memory containers in the pod should request",
+		"LIMITS_CPU":            "How much CPU resources containers in the pod should be limited to",
+		"LIMITS_MEM":            "How much memory containers in the pod should be limited to",
+		"IMAGE_ALIASES":         "comma-delimited strings used as stable names for images, used only when image selector type is \"env\"",
+		"IMAGE_DEFAULT":         "default image name to use when none found",
+		"IMAGE_SELECTOR_TYPE":   fmt.Sprintf("image selector type (\"env\" or \"api\", default %q)", defaultKubernetesImageSelectorType),
+		"IMAGE_SELECTOR_URL":    "URL for image selector API, used only when image selector is \"api\"",
+		"IMAGE_[ALIAS_]{ALIAS}": "full name for a given alias given via IMAGE_ALIASES, where the alias form in the key is uppercased and normalized by replacing non-alphanumerics with _",
+	}, newKubernetesProvider)
+}
+
 type kubernetesProvider struct {
-	cfg              *config.ProviderConfig
 	clientSet        *kubernetes.Clientset
 	restclientConfig *rest.Config
 	//	execCmd                []string
@@ -81,6 +86,7 @@ type kubernetesProvider struct {
 	limitsMem              string
 	requestsCPU            string
 	requestsMem            string
+	defaultImage           string
 	imageSelector          image.Selector
 }
 
@@ -168,8 +174,12 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		requestsMem = cfg.Get("REQUESTS_MEM")
 	}
 
+	defaultImage := defaultKubernetesImage
+	if cfg.IsSet("IMAGE_DEFAULT") {
+		defaultImage = cfg.Get("IMAGE_DEFAULT")
+	}
+
 	return &kubernetesProvider{
-		cfg:              cfg,
 		clientSet:        clientSet,
 		restclientConfig: config,
 		//		execCmd:                execCmd,
@@ -182,6 +192,7 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		limitsCPU:              limitsCPU,
 		requestsMem:            requestsMem,
 		requestsCPU:            requestsCPU,
+		defaultImage:           defaultImage,
 	}, nil
 }
 
@@ -232,6 +243,10 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 	if err != nil {
 		logger.WithField("err", err).Error("couldn't select image")
 		return nil, err
+	}
+
+	if selectedImageID == "default" {
+		selectedImageID = p.defaultImage
 	}
 
 	hostName := hostnameFromContext(ctx)
@@ -293,13 +308,13 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 				podReady <- runningPod.Status
 				return
 			}
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(500 * time.Millisecond)
 		}
 	}(pod.Name)
 
 	select {
 	case <-podReady:
-		metrics.TimeSince("worker.vm.provider.docker.boot", startBooting)
+		metrics.TimeSince("worker.vm.provider.kubernetes.boot", startBooting)
 		return &kubernetesInstance{
 			provider:        p,
 			startupDuration: dur,
@@ -312,7 +327,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		return nil, err
 	case <-ctx.Done():
 		if ctx.Err() == gocontext.DeadlineExceeded {
-			metrics.Mark("worker.vm.provider.docker.boot.timeout")
+			metrics.Mark("worker.vm.provider.kubernetes.boot.timeout")
 		}
 		return nil, ctx.Err()
 	}
