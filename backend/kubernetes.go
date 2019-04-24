@@ -350,15 +350,15 @@ func (p *kubernetesProvider) Setup(ctx gocontext.Context) error {
 }
 
 func (p *kubernetesProvider) upsertSecret(secret *apiv1.Secret) error {
-	existingSecret, err := p.clientSet.Core().Secrets(p.kubernetesNamespace).Get(defaultDockerCfgSecretName, metav1.GetOptions{})
+	existingSecret, err := p.clientSet.CoreV1().Secrets(p.kubernetesNamespace).Get(defaultDockerCfgSecretName, metav1.GetOptions{})
 
 	if err != nil {
-		_, err = p.clientSet.Core().Secrets(p.kubernetesNamespace).Create(secret)
+		_, err = p.clientSet.CoreV1().Secrets(p.kubernetesNamespace).Create(secret)
 		return err
 	}
 
 	if !reflect.DeepEqual(existingSecret.Data, secret.Data) {
-		_, err = p.clientSet.Core().Secrets(p.kubernetesNamespace).Update(secret)
+		_, err = p.clientSet.CoreV1().Secrets(p.kubernetesNamespace).Update(secret)
 	} else {
 
 	}
