@@ -480,6 +480,7 @@ func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, 
 		SubResource("exec")
 
 	req.VersionedParams(&apiv1.PodExecOptions{
+		TTY:       true,
 		Stdin:     stdin != nil,
 		Container: i.pod.Name,
 		Stdout:    stdout != nil,
