@@ -263,7 +263,6 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 					Name:    fmt.Sprintf("%s", hostName),
 					Image:   selectedImageID,
 					Command: []string{"/sbin/init"},
-					TTY:     true,
 					Resources: apiv1.ResourceRequirements{
 						Limits: apiv1.ResourceList{
 							apiv1.ResourceCPU:    resource.MustParse(p.limitsCPU),
@@ -480,7 +479,7 @@ func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, 
 		SubResource("exec")
 
 	req.VersionedParams(&apiv1.PodExecOptions{
-		TTY:       true,
+		TTY:       stdin == nil,
 		Stdin:     stdin != nil,
 		Container: i.pod.Name,
 		Stdout:    stdout != nil,
@@ -497,7 +496,7 @@ func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, 
 		Stdin:             stdin,
 		Stdout:            stdout,
 		Stderr:            stderr,
-		Tty:               false,
+		Tty:               stdin == nil,
 		TerminalSizeQueue: nil,
 	})
 
