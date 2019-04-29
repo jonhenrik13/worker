@@ -263,6 +263,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 					Name:    fmt.Sprintf("%s", hostName),
 					Image:   selectedImageID,
 					Command: []string{"/sbin/init"},
+					TTY:     true,
 					Resources: apiv1.ResourceRequirements{
 						Limits: apiv1.ResourceList{
 							apiv1.ResourceCPU:    resource.MustParse(p.limitsCPU),
