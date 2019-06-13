@@ -50,7 +50,7 @@ var (
 	defaultDockerRegistryHostName      = "index.docker.io"
 	defaultKubernetesNamespace         = "default"
 	defaultKubernetesImageSelectorType = imageSelectEnv
-	defaultKubernetesPodTermGrace      = 1
+	defaultKubernetesPodTermGrace      = 0
 	defaultKubernetesImage             = "travisci/ci-garnet:packer-1515445631-7dfb2e1"
 )
 
@@ -307,28 +307,36 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 			if runningPod.Status.Phase == "Running" {
 				podReady <- runningPod.Status
 				return
+			} else if runningPod.Status.Phase == "Evicted" {
+				errChan <- err
+				return
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
 	}(pod.Name)
 
+	instance := &kubernetesInstance{
+		provider:        p,
+		startupDuration: dur,
+		pod:             pod,
+		imageName:       selectedImageID,
+		startBooting:    startBooting,
+		endBooting:      time.Now(),
+	}
+
 	select {
 	case <-podReady:
 		metrics.TimeSince("worker.vm.provider.kubernetes.boot", startBooting)
-		return &kubernetesInstance{
-			provider:        p,
-			startupDuration: dur,
-			pod:             pod,
-			imageName:       selectedImageID,
-			startBooting:    startBooting,
-			endBooting:      time.Now(),
-		}, nil
+		instance.endBooting = time.Now()
+		return instance, nil
 	case err := <-errChan:
+		instance.deletePod(ctx)
 		return nil, err
 	case <-ctx.Done():
 		if ctx.Err() == gocontext.DeadlineExceeded {
 			metrics.Mark("worker.vm.provider.kubernetes.boot.timeout")
 		}
+		instance.deletePod(ctx)
 		return nil, ctx.Err()
 	}
 }
@@ -504,8 +512,11 @@ func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, 
 }
 
 func (i *kubernetesInstance) Stop(ctx gocontext.Context) error {
-	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
+	return i.deletePod(ctx)
+}
 
+func (i *kubernetesInstance) deletePod(ctx gocontext.Context) error {
+	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
 	podTerminated := make(chan error)
 
 	go func(podName string) {
@@ -525,7 +536,6 @@ func (i *kubernetesInstance) Stop(ctx gocontext.Context) error {
 		return ctx.Err()
 	case err := <-podTerminated:
 		return err
-
 	}
 }
 
