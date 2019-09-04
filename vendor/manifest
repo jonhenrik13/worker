@@ -127,15 +127,6 @@
 			"notests": true
 		},
 		{
-			"importpath": "git.apache.org/thrift.git/lib/go/thrift",
-			"repository": "https://git.apache.org/thrift.git",
-			"vcs": "git",
-			"revision": "961fa701346a3aaa804db8845f5eb38ea230b353",
-			"branch": "master",
-			"path": "/lib/go/thrift",
-			"notests": true
-		},
-		{
 			"importpath": "github.com/Azure/go-ntlmssp",
 			"repository": "https://github.com/Azure/go-ntlmssp",
 			"vcs": "git",
@@ -1044,7 +1035,7 @@
 			"importpath": "go.opencensus.io",
 			"repository": "https://github.com/census-instrumentation/opencensus-go",
 			"vcs": "git",
-			"revision": "ae36bd8445ff9cde752c94cf0d4f3f9dced1facc",
+			"revision": "c3153da60838155e855bf92946f877d763607410",
 			"branch": "master",
 			"notests": true
 		},
