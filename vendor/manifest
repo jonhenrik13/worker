@@ -127,8 +127,8 @@
 			"notests": true
 		},
 		{
-			"importpath": "git.apache.org/thrift.git/lib/go/thrift",
-			"repository": "https://git.apache.org/thrift.git",
+			"importpath": "github.com/apache/thrift.git/lib/go/thrift",
+			"repository": "https://github.com/apache/thrift.git",
 			"vcs": "git",
 			"revision": "961fa701346a3aaa804db8845f5eb38ea230b353",
 			"branch": "master",
