@@ -21,11 +21,13 @@ import (
 	"github.com/travis-ci/worker/context"
 	"github.com/travis-ci/worker/image"
 	"github.com/travis-ci/worker/metrics"
+	batchv1 "k8s.io/api/batch/v1"
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	scheme "k8s.io/client-go/kubernetes/scheme"
+
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
@@ -251,27 +253,22 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 
 	hostName := hostnameFromContext(ctx)
 
-	// TODO: Need to remove existing pods with the same name and wait for termination
-
-	podSpec := &apiv1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: fmt.Sprintf("%s", hostName),
-		},
-		Spec: apiv1.PodSpec{
-			Containers: []apiv1.Container{
-				{
-					Name:    fmt.Sprintf("%s", hostName),
-					Image:   selectedImageID,
-					Command: []string{"/sbin/init"},
-					Resources: apiv1.ResourceRequirements{
-						Limits: apiv1.ResourceList{
-							apiv1.ResourceCPU:    resource.MustParse(p.limitsCPU),
-							apiv1.ResourceMemory: resource.MustParse(p.limitsMem),
-						},
-						Requests: apiv1.ResourceList{
-							apiv1.ResourceCPU:    resource.MustParse(p.requestsCPU),
-							apiv1.ResourceMemory: resource.MustParse(p.requestsMem),
-						},
+	podSpec := apiv1.PodSpec{
+		RestartPolicy:                 "Never",
+		TerminationGracePeriodSeconds: int64Ptr(0),
+		Containers: []apiv1.Container{
+			{
+				Name:    hostName,
+				Image:   selectedImageID,
+				Command: []string{"/sbin/init"},
+				Resources: apiv1.ResourceRequirements{
+					Limits: apiv1.ResourceList{
+						apiv1.ResourceCPU:    resource.MustParse(p.limitsCPU),
+						apiv1.ResourceMemory: resource.MustParse(p.limitsMem),
+					},
+					Requests: apiv1.ResourceList{
+						apiv1.ResourceCPU:    resource.MustParse(p.requestsCPU),
+						apiv1.ResourceMemory: resource.MustParse(p.requestsMem),
 					},
 				},
 			},
@@ -279,7 +276,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 	}
 
 	if p.dockerRegistryUser != "" && p.dockerRegistryPassword != "" {
-		podSpec.Spec.ImagePullSecrets = []apiv1.LocalObjectReference{
+		podSpec.ImagePullSecrets = []apiv1.LocalObjectReference{
 			apiv1.LocalObjectReference{
 				Name: defaultDockerCfgSecretName,
 			},
@@ -288,24 +285,46 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 
 	startBooting := time.Now()
 
-	pod, err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Create(podSpec)
+	jobSpec := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: fmt.Sprintf("%s-", hostName),
+		},
+		Spec: batchv1.JobSpec{
+			Template: apiv1.PodTemplateSpec{
+				Spec: podSpec,
+			},
+			BackoffLimit:            int32Ptr(0),
+			TTLSecondsAfterFinished: int32Ptr(3600),
+			ActiveDeadlineSeconds:   int64Ptr(10800),
+		},
+	}
+
+	job, err := p.clientSet.BatchV1().Jobs(p.kubernetesNamespace).Create(jobSpec)
 
 	if err != nil {
 		return nil, err
 	}
 
-	podReady := make(chan apiv1.PodStatus)
+	podReady := make(chan apiv1.Pod)
 	errChan := make(chan error)
 
-	go func(podName string) {
+	listOptions := metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("controller-uid=%s", string(job.ObjectMeta.UID)),
+		Limit:         1,
+	}
+
+	go func(listOptions metav1.ListOptions) {
 		for {
-			runningPod, err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Get(podName, metav1.GetOptions{})
+			pods, err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).List(listOptions)
+
 			if err != nil {
 				errChan <- err
 				return
 			}
+			runningPod := pods.Items[0]
+
 			if runningPod.Status.Phase == "Running" {
-				podReady <- runningPod.Status
+				podReady <- runningPod
 				return
 			} else if runningPod.Status.Phase == "Evicted" {
 				errChan <- err
@@ -313,24 +332,27 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
-	}(pod.Name)
+	}(listOptions)
 
 	instance := &kubernetesInstance{
 		provider:        p,
 		startupDuration: dur,
-		pod:             pod,
+		job:             job,
+		containerName:   hostName,
 		imageName:       selectedImageID,
 		startBooting:    startBooting,
 		endBooting:      time.Now(),
 	}
 
 	select {
-	case <-podReady:
+	case pod := <-podReady:
 		metrics.TimeSince("worker.vm.provider.kubernetes.boot", startBooting)
 		instance.endBooting = time.Now()
+		instance.pod = &pod
 		return instance, nil
 	case err := <-errChan:
 		instance.deletePod(ctx)
+		fmt.Println(err.Error())
 		return nil, err
 	case <-ctx.Done():
 		if ctx.Err() == gocontext.DeadlineExceeded {
@@ -409,9 +431,15 @@ func newSecret(secretType apiv1.SecretType, namespace, name string) *apiv1.Secre
 	}
 }
 
+func int32Ptr(i int32) *int32 { return &i }
+
+func int64Ptr(i int64) *int64 { return &i }
+
 type kubernetesInstance struct {
 	provider        *kubernetesProvider
 	pod             *apiv1.Pod
+	job             *batchv1.Job
+	containerName   string
 	imageName       string
 	startupDuration time.Duration
 	startBooting    time.Time
@@ -486,10 +514,12 @@ func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, 
 		Name(i.pod.Name).
 		SubResource("exec")
 
+	//i.job.Status.Conditions[0].Status.
+
 	req.VersionedParams(&apiv1.PodExecOptions{
 		TTY:       stdin == nil,
 		Stdin:     stdin != nil,
-		Container: i.pod.Name,
+		Container: i.pod.Spec.Containers[0].Name,
 		Stdout:    stdout != nil,
 		Stderr:    stderr != nil,
 		Command:   command,
