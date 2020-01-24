@@ -255,7 +255,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 
 	podSpec := apiv1.PodSpec{
 		RestartPolicy:                 "Never",
-		TerminationGracePeriodSeconds: int64Ptr(0),
+		TerminationGracePeriodSeconds: int64Ptr(int64(defaultKubernetesPodTermGrace)),
 		Containers: []apiv1.Container{
 			{
 				Name:    hostName,
@@ -351,14 +351,14 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		instance.pod = &pod
 		return instance, nil
 	case err := <-errChan:
-		instance.deletePod(ctx)
+		instance.deleteJob(ctx)
 		fmt.Println(err.Error())
 		return nil, err
 	case <-ctx.Done():
 		if ctx.Err() == gocontext.DeadlineExceeded {
 			metrics.Mark("worker.vm.provider.kubernetes.boot.timeout")
 		}
-		instance.deletePod(ctx)
+		instance.deleteJob(ctx)
 		return nil, ctx.Err()
 	}
 }
@@ -542,46 +542,38 @@ func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, 
 }
 
 func (i *kubernetesInstance) Stop(ctx gocontext.Context) error {
-	return i.deletePod(ctx)
+	return i.deleteJob(ctx)
 }
 
-func (i *kubernetesInstance) deletePod(ctx gocontext.Context) error {
+func (i *kubernetesInstance) deleteJob(ctx gocontext.Context) error {
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
-	podTerminated := make(chan error)
+	jobTerminated := make(chan error)
 
-	go func(podName string) {
+	fg := metav1.DeletePropagationBackground
+	deleteOptions := metav1.DeleteOptions{PropagationPolicy: &fg}
+
+	go func(jobName string) {
 		for {
-			err := i.provider.deletePod(i.pod.Name)
+			err := i.provider.clientSet.BatchV1().Jobs(i.provider.kubernetesNamespace).Delete(jobName, &deleteOptions)
 			if err == nil {
-				podTerminated <- err
+				jobTerminated <- err
 				return
 			}
 			logger.WithField("err", err).Warn("Unable to communicate with the kubernetes api")
 			time.Sleep(1000 * time.Millisecond)
 		}
-	}(i.pod.Name)
+	}(i.job.Name)
 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case err := <-podTerminated:
+	case err := <-jobTerminated:
 		return err
 	}
 }
 
 func (i *kubernetesInstance) DownloadTrace(ctx gocontext.Context) ([]byte, error) {
 	return nil, nil
-}
-
-func (p *kubernetesProvider) deletePod(hostname string) error {
-	deletePolicy := metav1.DeletePropagationForeground
-	gracePeriod := int64(defaultKubernetesPodTermGrace)
-
-	err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Delete(hostname, &metav1.DeleteOptions{
-		PropagationPolicy:  &deletePolicy,
-		GracePeriodSeconds: &gracePeriod,
-	})
-	return err
 }
 
 func (i *kubernetesInstance) ID() string {
