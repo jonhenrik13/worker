@@ -255,7 +255,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 
 	podSpec := &apiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: fmt.Sprintf("%s", hostName),
+			GenerateName: fmt.Sprintf("%s-", hostName),
 		},
 		Spec: apiv1.PodSpec{
 			Containers: []apiv1.Container{
@@ -489,7 +489,7 @@ func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, 
 	req.VersionedParams(&apiv1.PodExecOptions{
 		TTY:       stdin == nil,
 		Stdin:     stdin != nil,
-		Container: i.pod.Name,
+		Container: i.pod.Spec.Containers[0].Name,
 		Stdout:    stdout != nil,
 		Stderr:    stderr != nil,
 		Command:   command,
