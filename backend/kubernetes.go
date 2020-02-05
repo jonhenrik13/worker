@@ -84,8 +84,10 @@ type kubernetesProvider struct {
 	kubernetesNamespace    string
 	limitsCPU              string
 	limitsMem              string
+	limitsStorage          string
 	requestsCPU            string
 	requestsMem            string
+	requestsStorage        string
 	defaultImage           string
 	imageSelector          image.Selector
 }
@@ -164,6 +166,11 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		limitsMem = cfg.Get("LIMITS_MEM")
 	}
 
+	limitsStorage := "0"
+	if cfg.IsSet("LIMITS_STORAGE") {
+		limitsStorage = cfg.Get("LIMITS_STORAGE")
+	}
+
 	requestsCPU := "0"
 	if cfg.IsSet("REQUESTS_CPU") {
 		requestsCPU = cfg.Get("REQUESTS_CPU")
@@ -172,6 +179,11 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 	requestsMem := "0"
 	if cfg.IsSet("REQUESTS_MEM") {
 		requestsMem = cfg.Get("REQUESTS_MEM")
+	}
+
+	requestsStorage := "0"
+	if cfg.IsSet("REQUESTS_STORAGE") {
+		requestsStorage = cfg.Get("REQUESTS_STORAGE")
 	}
 
 	defaultImage := defaultKubernetesImage
@@ -190,8 +202,10 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		imageSelector:          imageSelector,
 		limitsMem:              limitsMem,
 		limitsCPU:              limitsCPU,
+		limitsStorage:          limitsStorage,
 		requestsMem:            requestsMem,
 		requestsCPU:            requestsCPU,
+		requestsStorage:        requestsStorage,
 		defaultImage:           defaultImage,
 	}, nil
 }
@@ -265,12 +279,14 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 					Command: []string{"/sbin/init"},
 					Resources: apiv1.ResourceRequirements{
 						Limits: apiv1.ResourceList{
-							apiv1.ResourceCPU:    resource.MustParse(p.limitsCPU),
-							apiv1.ResourceMemory: resource.MustParse(p.limitsMem),
+							apiv1.ResourceCPU:              resource.MustParse(p.limitsCPU),
+							apiv1.ResourceMemory:           resource.MustParse(p.limitsMem),
+							apiv1.ResourceEphemeralStorage: resource.MustParse(p.limitsStorage),
 						},
 						Requests: apiv1.ResourceList{
-							apiv1.ResourceCPU:    resource.MustParse(p.requestsCPU),
-							apiv1.ResourceMemory: resource.MustParse(p.requestsMem),
+							apiv1.ResourceCPU:              resource.MustParse(p.requestsCPU),
+							apiv1.ResourceMemory:           resource.MustParse(p.requestsMem),
+							apiv1.ResourceEphemeralStorage: resource.MustParse(p.requestsStorage),
 						},
 					},
 				},
