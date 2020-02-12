@@ -64,8 +64,10 @@ func init() {
 		"KUBECONFIG_PATH":       "Path to kubeconfig file",
 		"REQUESTS_CPU":          "How much CPU resources containers in the pod should request",
 		"REQUESTS_MEM":          "How much memory containers in the pod should request",
+		"REQUESTS_STORAGE":      "How much ephemeral storage containers in the pod should request",
 		"LIMITS_CPU":            "How much CPU resources containers in the pod should be limited to",
 		"LIMITS_MEM":            "How much memory containers in the pod should be limited to",
+		"LIMITS_STORAGE":        "How much ephemeral storage containers in the pod should be limited to",
 		"IMAGE_ALIASES":         "comma-delimited strings used as stable names for images, used only when image selector type is \"env\"",
 		"IMAGE_DEFAULT":         "default image name to use when none found",
 		"IMAGE_SELECTOR_TYPE":   fmt.Sprintf("image selector type (\"env\" or \"api\", default %q)", defaultKubernetesImageSelectorType),
@@ -84,8 +86,10 @@ type kubernetesProvider struct {
 	kubernetesNamespace    string
 	limitsCPU              string
 	limitsMem              string
+	limitsStorage          string
 	requestsCPU            string
 	requestsMem            string
+	requestsStorage        string
 	defaultImage           string
 	imageSelector          image.Selector
 }
@@ -164,6 +168,11 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		limitsMem = cfg.Get("LIMITS_MEM")
 	}
 
+	limitsStorage := "0"
+	if cfg.IsSet("LIMITS_STORAGE") {
+		limitsStorage = cfg.Get("LIMITS_STORAGE")
+	}
+
 	requestsCPU := "0"
 	if cfg.IsSet("REQUESTS_CPU") {
 		requestsCPU = cfg.Get("REQUESTS_CPU")
@@ -172,6 +181,11 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 	requestsMem := "0"
 	if cfg.IsSet("REQUESTS_MEM") {
 		requestsMem = cfg.Get("REQUESTS_MEM")
+	}
+
+	requestsStorage := "0"
+	if cfg.IsSet("REQUESTS_STORAGE") {
+		requestsStorage = cfg.Get("REQUESTS_STORAGE")
 	}
 
 	defaultImage := defaultKubernetesImage
@@ -190,8 +204,10 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		imageSelector:          imageSelector,
 		limitsMem:              limitsMem,
 		limitsCPU:              limitsCPU,
+		limitsStorage:          limitsStorage,
 		requestsMem:            requestsMem,
 		requestsCPU:            requestsCPU,
+		requestsStorage:        requestsStorage,
 		defaultImage:           defaultImage,
 	}, nil
 }
@@ -265,12 +281,14 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 					Command: []string{"/sbin/init"},
 					Resources: apiv1.ResourceRequirements{
 						Limits: apiv1.ResourceList{
-							apiv1.ResourceCPU:    resource.MustParse(p.limitsCPU),
-							apiv1.ResourceMemory: resource.MustParse(p.limitsMem),
+							apiv1.ResourceCPU:              resource.MustParse(p.limitsCPU),
+							apiv1.ResourceMemory:           resource.MustParse(p.limitsMem),
+							apiv1.ResourceEphemeralStorage: resource.MustParse(p.limitsStorage),
 						},
 						Requests: apiv1.ResourceList{
-							apiv1.ResourceCPU:    resource.MustParse(p.requestsCPU),
-							apiv1.ResourceMemory: resource.MustParse(p.requestsMem),
+							apiv1.ResourceCPU:              resource.MustParse(p.requestsCPU),
+							apiv1.ResourceMemory:           resource.MustParse(p.requestsMem),
+							apiv1.ResourceEphemeralStorage: resource.MustParse(p.requestsStorage),
 						},
 					},
 				},
