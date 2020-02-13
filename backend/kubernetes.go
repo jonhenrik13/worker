@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -45,7 +44,8 @@ const imageSelectAPI = "api"
 const imageSelectEnv = "env"
 
 var (
-	defaultKubeConfig                  = filepath.Join(os.Getenv("HOME"), ".kube", "config")
+	//defaultKubeConfig                  = filepath.Join(os.Getenv("HOME"), ".kube", "config")
+	defaultKubeConfigPath              = ""
 	defaultDockerCfgSecretName         = "travis-docker-registry"
 	defaultDockerRegistryHostName      = "index.docker.io"
 	defaultKubernetesNamespace         = "default"
@@ -96,7 +96,7 @@ type kubernetesProvider struct {
 
 func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 
-	kubeConfigPath := defaultKubeConfig
+	kubeConfigPath := defaultKubeConfigPath
 	if cfg.IsSet("KUBECONFIG_PATH") {
 		kubeConfigPath = cfg.Get("KUBECONFIG_PATH")
 	}
@@ -105,7 +105,9 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		return nil, err
 	}
 
+	// If kubeConfigPath is empty, then clientcmd will return InClusterConfig
 	config, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
+
 	if err != nil {
 		return nil, err
 	}
@@ -122,6 +124,12 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		}
 	*/
 
+	kubernetesNamespace := defaultKubernetesNamespace
+
+	if cfg.IsSet("NAMESPACE") {
+		kubernetesNamespace = cfg.Get("NAMESPACE")
+	}
+
 	dockerRegistryHost := defaultDockerRegistryHostName
 	if cfg.IsSet("REGISTRY_HOSTNAME") {
 		dockerRegistryHost = cfg.Get("REGISTRY_HOSTNAME")
@@ -136,12 +144,6 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 			dockerRegistryUser = cfg.Get("REGISTRY_LOGIN")
 			dockerRegistryPassword = cfg.Get("REGISTRY_PASSWORD")
 		}
-	}
-
-	kubernetesNamespace := defaultKubernetesNamespace
-
-	if cfg.IsSet("NAMESPACE") {
-		kubernetesNamespace = cfg.Get("NAMESPACE")
 	}
 
 	imageSelectorType := defaultKubernetesImageSelectorType
