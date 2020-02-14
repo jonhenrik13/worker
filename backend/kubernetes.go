@@ -46,7 +46,6 @@ const imageSelectAPI = "api"
 const imageSelectEnv = "env"
 
 var (
-	//defaultKubeConfig                  = filepath.Join(os.Getenv("HOME"), ".kube", "config")
 	defaultKubeConfigPath              = ""
 	defaultDockerCfgSecretName         = "travis-docker-registry"
 	defaultDockerRegistryHostName      = "index.docker.io"
