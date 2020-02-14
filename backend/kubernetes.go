@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -488,12 +490,19 @@ func (i *kubernetesInstance) runScriptExec(ctx gocontext.Context, output io.Writ
 	command := []string{"su", "-c", "/home/travis/build.sh", "-", "travis"}
 	err := i.execute(command, nil, output, output)
 
-	exitCode := int32(0)
+	runResult := &RunResult{Completed: true, ExitCode: 0}
 	if err != nil {
-		exitCode = int32(1)
+		matcher, _ := regexp.Compile(`^\s*command\s+terminated\s+with\s+exit\s+code\s+(\d+)\s*$`)
+		matcherGroups := matcher.FindStringSubmatch(err.Error())
+		if matcherGroups != nil {
+			exitCode, _ := strconv.Atoi(matcherGroups[1])
+			runResult.ExitCode = int32(exitCode)
+		} else {
+			runResult.Completed = false
+		}
 	}
 
-	return &RunResult{Completed: err != nil, ExitCode: exitCode}, errors.Wrap(err, "error running script")
+	return runResult, errors.Wrap(err, "error running script")
 }
 
 func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, stderr io.Writer) error {
