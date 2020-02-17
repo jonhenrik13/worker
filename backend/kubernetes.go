@@ -9,8 +9,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,7 +46,7 @@ const imageSelectAPI = "api"
 const imageSelectEnv = "env"
 
 var (
-	defaultKubeConfig                  = filepath.Join(os.Getenv("HOME"), ".kube", "config")
+	defaultKubeConfigPath              = ""
 	defaultDockerCfgSecretName         = "travis-docker-registry"
 	defaultDockerRegistryHostName      = "index.docker.io"
 	defaultKubernetesNamespace         = "default"
@@ -96,7 +97,7 @@ type kubernetesProvider struct {
 
 func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 
-	kubeConfigPath := defaultKubeConfig
+	kubeConfigPath := defaultKubeConfigPath
 	if cfg.IsSet("KUBECONFIG_PATH") {
 		kubeConfigPath = cfg.Get("KUBECONFIG_PATH")
 	}
@@ -105,7 +106,9 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		return nil, err
 	}
 
+	// If kubeConfigPath is empty, then clientcmd will return InClusterConfig
 	config, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
+
 	if err != nil {
 		return nil, err
 	}
@@ -122,6 +125,12 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		}
 	*/
 
+	kubernetesNamespace := defaultKubernetesNamespace
+
+	if cfg.IsSet("NAMESPACE") {
+		kubernetesNamespace = cfg.Get("NAMESPACE")
+	}
+
 	dockerRegistryHost := defaultDockerRegistryHostName
 	if cfg.IsSet("REGISTRY_HOSTNAME") {
 		dockerRegistryHost = cfg.Get("REGISTRY_HOSTNAME")
@@ -136,12 +145,6 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 			dockerRegistryUser = cfg.Get("REGISTRY_LOGIN")
 			dockerRegistryPassword = cfg.Get("REGISTRY_PASSWORD")
 		}
-	}
-
-	kubernetesNamespace := defaultKubernetesNamespace
-
-	if cfg.IsSet("NAMESPACE") {
-		kubernetesNamespace = cfg.Get("NAMESPACE")
 	}
 
 	imageSelectorType := defaultKubernetesImageSelectorType
@@ -486,12 +489,19 @@ func (i *kubernetesInstance) runScriptExec(ctx gocontext.Context, output io.Writ
 	command := []string{"su", "-c", "/home/travis/build.sh", "-", "travis"}
 	err := i.execute(command, nil, output, output)
 
-	exitCode := int32(0)
+	runResult := &RunResult{Completed: true, ExitCode: 0}
 	if err != nil {
-		exitCode = int32(1)
+		matcher, _ := regexp.Compile(`^\s*command\s+terminated\s+with\s+exit\s+code\s+(\d+)\s*$`)
+		matcherGroups := matcher.FindStringSubmatch(err.Error())
+		if matcherGroups != nil {
+			exitCode, _ := strconv.Atoi(matcherGroups[1])
+			runResult.ExitCode = int32(exitCode)
+		} else {
+			runResult.Completed = false
+		}
 	}
 
-	return &RunResult{Completed: err != nil, ExitCode: exitCode}, errors.Wrap(err, "error running script")
+	return runResult, errors.Wrap(err, "error running script")
 }
 
 func (i *kubernetesInstance) execute(command []string, stdin io.Reader, stdout, stderr io.Writer) error {
