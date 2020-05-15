@@ -549,12 +549,14 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 				tmpKeyName:   keyResp.KeyName,
 			}, nil
 		}
+		_ = p.deleteKeyPair(*keyResp.KeyName)
 		return nil, lastErr
 	case <-ctx.Done():
 		context.LoggerFromContext(ctx).WithFields(logrus.Fields{
 			"err":  lastErr,
 			"self": "backend/ec2_instance",
 		}).Info("Stopping probing for up instance")
+		_ = p.deleteKeyPair(*keyResp.KeyName)
 		return nil, ctx.Err()
 	}
 }
@@ -687,9 +689,22 @@ func (i *ec2Instance) runScriptSSH(ctx gocontext.Context, output io.Writer) (*Ru
 	return &RunResult{Completed: err != nil, ExitCode: exitStatus}, errors.Wrap(err, "error running script")
 }
 
+func (p *ec2Provider) deleteKeyPair(keyName string) error {
+	svc := ec2.New(p.awsSession)
+	deleteKeyPairInput := &ec2.DeleteKeyPairInput{
+		KeyName: aws.String(keyName),
+	}
+
+	_, err := svc.DeleteKeyPair(deleteKeyPairInput)
+
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (i *ec2Instance) Stop(ctx gocontext.Context) error {
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/ec2_provider")
-	//hostName := hostnameFromContext(ctx)
 
 	svc := ec2.New(i.provider.awsSession)
 
@@ -707,11 +722,7 @@ func (i *ec2Instance) Stop(ctx gocontext.Context) error {
 
 	logger.Info(fmt.Sprintf("Terminated instance %s with hostname %s", *i.instance.InstanceId, *i.instance.PrivateDnsName))
 
-	deleteKeyPairInput := &ec2.DeleteKeyPairInput{
-		KeyName: i.tmpKeyName,
-	}
-
-	_, err = svc.DeleteKeyPair(deleteKeyPairInput)
+	err = i.provider.deleteKeyPair(*i.tmpKeyName)
 
 	if err != nil {
 		return err
