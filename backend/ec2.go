@@ -506,17 +506,25 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 			}
 
 			instances, lastErr = svc.DescribeInstances(describeInstancesInput)
-			if instances != nil {
-				instance := instances.Reservations[0].Instances[0]
-				address := *instance.PrivateIpAddress
-				if p.publicIPConnect {
-					address = *instance.PublicIpAddress
-				}
-				if address != "" {
-					_, lastErr = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", address, 22), 1*time.Second)
-					if lastErr == nil {
-						instanceChan <- instance
-						return
+			if instances != nil && instances.Reservations != nil {
+				if instances.Reservations[0].Instances != nil {
+					instance := instances.Reservations[0].Instances[0]
+					address := ""
+					if p.publicIPConnect {
+						if instance.PublicIpAddress != nil {
+							address = *instance.PublicIpAddress
+						}
+					} else {
+						if instance.PrivateIpAddress != nil {
+							address = *instance.PrivateIpAddress
+						}
+					}
+					if address != "" {
+						_, lastErr = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", address, 22), 1*time.Second)
+						if lastErr == nil {
+							instanceChan <- instance
+							return
+						}
 					}
 				}
 			}
