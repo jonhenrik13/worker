@@ -44,6 +44,7 @@ var (
 	defaultEC2UploadRetries     = uint64(120)
 	defaultEC2UploadRetrySleep  = 1 * time.Second
 	defaultEC2Region            = "eu-west-1"
+	defaultEC2PreProvisionPool  = int64(0)
 )
 
 var (
@@ -72,7 +73,6 @@ func init() {
 		"INSTANCE_TYPE":            "Instance type to use for builds", // t2 and t3 are burstable
 		"SUBNET_ID":                "Subnet ID to launch instances into",
 		"EBS_OPTIMIZED":            "Whether or not to use EBS-optimized instances (Default: false)",
-		"IAM_INSTANCE_PROFILE":     "This is not a good idea... for security, builds should provice API keys",
 		"USER_DATA":                "User data, needs to be URL safe base64 encoded format (RFC 4648)",
 		"CPU_CREDIT_SPECIFICATION": "standard|unlimited (for faster boots)",
 		"TAGS":                     "Tags, how to deal with key value?",
@@ -90,28 +90,33 @@ func init() {
 		"IMAGE_SELECTOR_URL":       "URL for image selector API, used only when image selector is \"api\"",
 		"IMAGE_[ALIAS_]{ALIAS}":    "full name for a given alias given via IMAGE_ALIASES, where the alias form in the key is uppercased and normalized by replacing non-alphanumerics with _",
 		"CUSTOM_TAGS":              "Custom tags to set for the EC2 instance. Comma separated list with format key1=value1,key2=value2.....keyN=valueN",
+		"PREPROVISION_POOL":        "Number of instances pre-provision as hibernated instances",
+		"KMSKEY_ID":                "KMS key id used for encryption of EBS volumes, which is required for hibernation",
 	}, newEC2Provider)
 }
 
 type ec2Provider struct {
-	cfg              *config.ProviderConfig
-	execCmd          []string
-	imageSelector    image.Selector
-	awsSession       *session.Session
-	instanceType     string
-	defaultImage     string
-	securityGroups   []string
-	ebsOptimized     bool
-	diskSize         int64
-	uploadRetries    uint64
-	uploadRetrySleep time.Duration
-	sshDialTimeout   time.Duration
-	publicIP         bool
-	publicIPConnect  bool
-	subnetID         string
-	keyName          string
-	userData         string
-	customTags       map[string]string
+	cfg                *config.ProviderConfig
+	execCmd            []string
+	imageSelector      image.Selector
+	awsSession         *session.Session
+	instanceType       string
+	defaultImage       string
+	securityGroups     []string
+	ebsOptimized       bool
+	diskSize           int64
+	uploadRetries      uint64
+	uploadRetrySleep   time.Duration
+	sshDialTimeout     time.Duration
+	publicIP           bool
+	publicIPConnect    bool
+	subnetID           string
+	keyName            string
+	userData           string
+	customTags         map[string]string
+	preProvisionPool   int64
+	kmsKeyID           string
+	preProvisionKeyMap map[string]*ec2.CreateKeyPairOutput
 }
 
 func newEC2Provider(cfg *config.ProviderConfig) (Provider, error) {
@@ -265,6 +270,21 @@ func newEC2Provider(cfg *config.ProviderConfig) (Provider, error) {
 		keyName = cfg.Get("KEY_NAME")
 	}
 
+	preProvisionPool := defaultEC2PreProvisionPool
+	if cfg.IsSet("PREPROVISION_POOL") {
+		pp, err := strconv.ParseInt(cfg.Get("PREPROVISION_POOL"), 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		preProvisionPool = pp
+	}
+
+	kmsKeyID := ""
+
+	if cfg.IsSet("KMSKEY_ID") {
+		kmsKeyID = cfg.Get("KMSKEY_ID")
+	}
+
 	return &ec2Provider{
 		cfg:              cfg,
 		sshDialTimeout:   sshDialTimeout,
@@ -284,6 +304,8 @@ func newEC2Provider(cfg *config.ProviderConfig) (Provider, error) {
 		userData:         userData,
 		keyName:          keyName,
 		customTags:       customTags,
+		preProvisionPool: preProvisionPool,
+		kmsKeyID:         kmsKeyID,
 	}, nil
 }
 
@@ -312,6 +334,24 @@ func (p *ec2Provider) SupportsProgress() bool {
 
 func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttributes) (Instance, error) {
 	startBooting := time.Now()
+
+	instance, sshDialer, tmpKeyName, err := p.startInstance(ctx, startAttributes)
+
+	if instance != nil {
+		return &ec2Instance{
+			provider:     p,
+			sshDialer:    sshDialer,
+			endBooting:   time.Now(),
+			startBooting: startBooting,
+			instance:     instance,
+			tmpKeyName:   aws.String(tmpKeyName),
+		}, nil
+	}
+	_ = p.deleteKeyPair(tmpKeyName)
+	return nil, err
+}
+
+func (p *ec2Provider) getLaunchConfig(ctx gocontext.Context, startAttributes *StartAttributes) (*ec2.RunInstancesInput, *ec2.CreateKeyPairOutput, error) {
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/ec2_provider")
 	hostName := hostnameFromContext(ctx)
 
@@ -326,7 +366,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 
 	if err != nil {
 		logger.WithField("err", err).Errorf("Unable to generate keypair %s", *keyPairInput.KeyName)
-		return nil, err
+		return nil, nil, err
 	}
 
 	block, _ := pem.Decode([]byte(*keyResp.KeyMaterial))
@@ -335,21 +375,14 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 
 	if err != nil {
 		logger.WithField("err", err).Error("Unable to parse private key")
-		return nil, err
+		return nil, nil, err
 	}
 
 	publicKey, err := ssh.FormatPublicKey(key.Public())
 
 	if err != nil {
 		logger.WithField("err", err).Error(fmt.Sprintf("Unable to format public key for private key %s", *keyResp.KeyName))
-		return nil, err
-	}
-
-	privateKey := *keyResp.KeyMaterial
-	sshDialer, err := ssh.NewDialerWithKeyWithoutPassPhrase([]byte(privateKey))
-
-	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	userDataBuffer := bytes.Buffer{}
@@ -359,7 +392,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	userDataEncoded := base64.StdEncoding.EncodeToString(userDataBuffer.Bytes())
@@ -370,7 +403,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if imageID == "default" {
@@ -382,16 +415,79 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 		securityGroups = append(securityGroups, &securityGroup)
 	}
 
+	blockDevice := &ec2.EbsBlockDevice{
+		VolumeSize:          aws.Int64(p.diskSize),
+		DeleteOnTermination: aws.Bool(true),
+	}
+
+	hibernationOptions := &ec2.HibernationOptionsRequest{
+		Configured: aws.Bool(false),
+	}
+
+	if p.kmsKeyID != "" {
+		blockDevice.KmsKeyId = aws.String(p.kmsKeyID)
+		blockDevice.Encrypted = aws.Bool(true)
+		hibernationOptions.Configured = aws.Bool(true)
+	}
+
 	blockDeviceMappings := []*ec2.BlockDeviceMapping{
 		&ec2.BlockDeviceMapping{
 			DeviceName: aws.String("/dev/sda1"),
-			Ebs: &ec2.EbsBlockDevice{
-				VolumeSize: aws.Int64(p.diskSize),
-			},
+			Ebs:        blockDevice,
 		},
 	}
 
+	keyName := keyResp.KeyName
+	if p.keyName != "" {
+		keyName = aws.String(p.keyName)
+	}
+
+	runOpts := &ec2.RunInstancesInput{
+		ImageId:             aws.String(imageID),
+		InstanceType:        aws.String(p.instanceType),
+		MaxCount:            aws.Int64(1),
+		MinCount:            aws.Int64(1),
+		KeyName:             keyName,
+		EbsOptimized:        aws.Bool(p.ebsOptimized),
+		UserData:            aws.String(userDataEncoded),
+		BlockDeviceMappings: blockDeviceMappings,
+		HibernationOptions:  hibernationOptions,
+	}
+
+	regex := regexp.MustCompile("^(t2|t3).*")
+
+	if regex.MatchString(p.instanceType) {
+		runOpts.CreditSpecification = &ec2.CreditSpecificationRequest{
+			CpuCredits: aws.String("unlimited"), // TODO:
+		}
+	}
+
+	if p.subnetID != "" && p.publicIP {
+		runOpts.NetworkInterfaces = []*ec2.InstanceNetworkInterfaceSpecification{
+			{
+				DeviceIndex:              aws.Int64(0),
+				AssociatePublicIpAddress: &p.publicIP,
+				SubnetId:                 aws.String(p.subnetID),
+				Groups:                   securityGroups,
+				DeleteOnTermination:      aws.Bool(true),
+			},
+		}
+	} else {
+		runOpts.SubnetId = aws.String(p.subnetID)
+		runOpts.SecurityGroupIds = securityGroups
+	}
+
+	return runOpts, keyResp, nil
+}
+
+func (p *ec2Provider) getJobTags(ctx gocontext.Context, startAttributes *StartAttributes) []*ec2.Tag {
+
+	hostName := hostnameFromContext(ctx)
 	tags := []*ec2.Tag{
+		&ec2.Tag{
+			Key:   aws.String("travis.hibernation-state"),
+			Value: aws.String("unavailable"),
+		},
 		&ec2.Tag{
 			Key:   aws.String("Name"),
 			Value: aws.String(hostName),
@@ -436,74 +532,201 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 		})
 	}
 
-	keyName := keyResp.KeyName
-	if p.keyName != "" {
-		keyName = aws.String(p.keyName)
-	}
-	//RequestSpotInstances
+	return tags
+}
 
-	runOpts := &ec2.RunInstancesInput{
-		ImageId:             aws.String(imageID),
-		InstanceType:        aws.String(p.instanceType),
-		MaxCount:            aws.Int64(1),
-		MinCount:            aws.Int64(1),
-		KeyName:             keyName,
-		EbsOptimized:        aws.Bool(p.ebsOptimized),
-		UserData:            aws.String(userDataEncoded),
-		BlockDeviceMappings: blockDeviceMappings,
-		TagSpecifications: []*ec2.TagSpecification{
+func (p *ec2Provider) startInstance(ctx gocontext.Context, startAttributes *StartAttributes) (*ec2.Instance, *ssh.AuthDialer, string, error) {
+	tags := p.getJobTags(ctx, startAttributes)
+
+	if len(p.preProvisionKeyMap) == 0 {
+		runOpts, keyResp, err := p.getLaunchConfig(ctx, startAttributes)
+
+		if err != nil {
+			_ = p.deleteKeyPair(*keyResp.KeyName)
+			return nil, nil, "", err
+		}
+
+		sshDialer, err := ssh.NewDialerWithKeyWithoutPassPhrase([]byte(*keyResp.KeyMaterial))
+
+		if err != nil {
+			return nil, nil, "", err
+		}
+
+		runOpts.TagSpecifications = []*ec2.TagSpecification{
 			&ec2.TagSpecification{
 				ResourceType: aws.String("instance"),
 				Tags:         tags,
 			},
+		}
+		instance, err := p.startInstanceCold(ctx, runOpts)
+		return instance, sshDialer, *keyResp.KeyName, err
+	}
+	// Get the first key
+	var instanceId string
+	var keyResp *ec2.CreateKeyPairOutput
+	for instanceId, keyResp = range p.preProvisionKeyMap {
+		delete(p.preProvisionKeyMap, instanceId)
+		break
+	}
+
+	sshDialer, err := ssh.NewDialerWithKeyWithoutPassPhrase([]byte(*keyResp.KeyMaterial))
+	if err != nil {
+		return nil, nil, "", err
+	}
+	instance, err := p.startInstanceWarm(ctx, instanceId, tags)
+
+	return instance, sshDialer, *keyResp.KeyName, err
+
+}
+
+func (p *ec2Provider) startInstanceHibernate(ctx gocontext.Context, language string) error {
+
+	startAttributes := &StartAttributes{
+		Language: language,
+	}
+
+	runOpts, keyResp, err := p.getLaunchConfig(ctx, startAttributes)
+
+	if err != nil {
+		panic(err)
+	}
+
+	tags := []*ec2.Tag{
+		&ec2.Tag{
+			Key:   aws.String("Name"),
+			Value: aws.String(fmt.Sprintf("travis-builder-%s", language)),
+		},
+		&ec2.Tag{
+			Key:   aws.String("travis.hibernation-state"),
+			Value: aws.String("provisioning"),
 		},
 	}
 
-	regex := regexp.MustCompile("^(t2|t3).*")
-
-	if regex.MatchString(p.instanceType) {
-		runOpts.CreditSpecification = &ec2.CreditSpecificationRequest{
-			CpuCredits: aws.String("unlimited"), // TODO:
-		}
+	runOpts.TagSpecifications = []*ec2.TagSpecification{
+		&ec2.TagSpecification{
+			ResourceType: aws.String("instance"),
+			Tags:         tags,
+		},
 	}
 
-	if p.subnetID != "" && p.publicIP {
-		runOpts.NetworkInterfaces = []*ec2.InstanceNetworkInterfaceSpecification{
-			{
-				DeviceIndex:              aws.Int64(0),
-				AssociatePublicIpAddress: &p.publicIP,
-				SubnetId:                 aws.String(p.subnetID),
-				Groups:                   securityGroups,
-				DeleteOnTermination:      aws.Bool(true),
-			},
-		}
-	} else {
-		runOpts.SubnetId = aws.String(p.subnetID)
-		runOpts.SecurityGroupIds = securityGroups
-	}
-
-	reservation, err := svc.RunInstances(runOpts)
+	instance, err := p.startInstanceCold(ctx, runOpts)
 
 	if err != nil {
-		return nil, err
+		p.deleteKeyPair(*keyResp.KeyName)
+		panic(err)
+	}
+
+	svc := ec2.New(p.awsSession)
+
+	// This can be one api call
+	hibernateInput := &ec2.StopInstancesInput{
+		InstanceIds: []*string{
+			instance.InstanceId,
+		},
+		Hibernate: aws.Bool(true),
+	}
+
+	errCount := 0
+	for errCount < 500 {
+		hibernateOutput, err := svc.StopInstances(hibernateInput)
+		if err == nil {
+			fmt.Printf("%+v\n", hibernateOutput)
+			break
+		}
+		errCount++
+		if errCount >= 500 {
+			return errors.New("Exceeded hibernation limit")
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	describeInstancesInput := &ec2.DescribeInstancesInput{
 		InstanceIds: []*string{
-			reservation.Instances[0].InstanceId,
+			instance.InstanceId,
+		},
+	}
+	errCount = 0
+	for errCount < 1000 {
+		instances, _ := svc.DescribeInstances(describeInstancesInput)
+
+		if instances != nil && instances.Reservations != nil {
+			if instances.Reservations[0].Instances != nil {
+				instance := instances.Reservations[0].Instances[0]
+				if *instance.State.Name == ec2.InstanceStateNameStopped {
+					break
+				}
+			}
+		}
+		errCount++
+	}
+
+	tagInput := &ec2.CreateTagsInput{
+		Resources: []*string{
+			instance.InstanceId,
+		},
+		Tags: []*ec2.Tag{
+			&ec2.Tag{
+				Key:   aws.String("travis.hibernation-state"),
+				Value: aws.String("ready"),
+			},
+		},
+	}
+
+	_, err = svc.CreateTags(tagInput)
+
+	p.preProvisionKeyMap[*instance.InstanceId] = keyResp
+	fmt.Printf("errCount: %d\n", errCount)
+	fmt.Printf("%+v\n", instance)
+	fmt.Printf("%+v\n", p.preProvisionKeyMap)
+	return nil
+}
+
+func (p *ec2Provider) startInstanceWarm(ctx gocontext.Context, instanceId string, tags []*ec2.Tag) (*ec2.Instance, error) {
+
+	svc := ec2.New(p.awsSession)
+
+	tagInput := &ec2.CreateTagsInput{
+		Resources: []*string{
+			aws.String(instanceId),
+		},
+		Tags: tags,
+	}
+
+	_, err := svc.CreateTags(tagInput)
+
+	startInput := &ec2.StartInstancesInput{
+		InstanceIds: []*string{
+			aws.String(instanceId),
+		},
+	}
+	_, err = svc.StartInstances(startInput)
+	if err != nil {
+		return nil, err
+	}
+	logger := context.LoggerFromContext(ctx).WithField("self", "backend/ec2_provider")
+	logger.Info(fmt.Sprintf("Started warm instance %s", instanceId))
+	//fmt.Printf("#### HIBERNATED INSTANCE\n")
+	//fmt.Printf("%+v\n", output)
+	return p.waitForUp(ctx, instanceId)
+}
+
+func (p *ec2Provider) waitForUp(ctx gocontext.Context, instanceId string) (*ec2.Instance, error) {
+
+	svc := ec2.New(p.awsSession)
+
+	describeInstancesInput := &ec2.DescribeInstancesInput{
+		InstanceIds: []*string{
+			aws.String(instanceId),
 		},
 	}
 
 	instanceChan := make(chan *ec2.Instance)
+
 	var lastErr error
 	go func() {
 		for {
 			var errCount uint64
 			var instances *ec2.DescribeInstancesOutput
-
-			if ctx.Err() != nil {
-				return
-			}
 
 			instances, lastErr = svc.DescribeInstances(describeInstancesInput)
 			if instances != nil && instances.Reservations != nil {
@@ -540,28 +763,83 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 	select {
 	case instance := <-instanceChan:
 		if instance != nil {
-			return &ec2Instance{
-				provider:     p,
-				sshDialer:    sshDialer,
-				endBooting:   time.Now(),
-				startBooting: startBooting,
-				instance:     instance,
-				tmpKeyName:   keyResp.KeyName,
-			}, nil
+			return instance, nil
 		}
-		_ = p.deleteKeyPair(*keyResp.KeyName)
 		return nil, lastErr
 	case <-ctx.Done():
 		context.LoggerFromContext(ctx).WithFields(logrus.Fields{
 			"err":  lastErr,
 			"self": "backend/ec2_instance",
 		}).Info("Stopping probing for up instance")
-		_ = p.deleteKeyPair(*keyResp.KeyName)
 		return nil, ctx.Err()
 	}
 }
 
+func (p *ec2Provider) startInstanceCold(ctx gocontext.Context, runOpts *ec2.RunInstancesInput) (*ec2.Instance, error) {
+	svc := ec2.New(p.awsSession)
+
+	reservation, err := svc.RunInstances(runOpts)
+
+	if err != nil {
+		return nil, err
+	}
+
+	logger := context.LoggerFromContext(ctx).WithField("self", "backend/ec2_provider")
+	logger.Info(fmt.Sprintf("Started cold instance %s", *reservation.Instances[0].InstanceId))
+
+	if err != nil {
+		return nil, err
+	}
+	return p.waitForUp(ctx, *reservation.Instances[0].InstanceId)
+}
+
 func (p *ec2Provider) Setup(ctx gocontext.Context) error {
+	p.preProvisionKeyMap = make(map[string]*ec2.CreateKeyPairOutput, 0)
+
+	if p.preProvisionPool > 0 {
+		//p.startInstanceHibernate(ctx, "default")
+		svc := ec2.New(p.awsSession)
+		describeInput := &ec2.DescribeInstancesInput{
+			Filters: []*ec2.Filter{
+				{
+					Name:   aws.String("tag:travis.hibernation-state"),
+					Values: []*string{aws.String("provisioning"), aws.String("ready")},
+				},
+				{
+					Name: aws.String("instance-state-name"),
+					Values: []*string{
+						aws.String("pending"),
+						aws.String("running"),
+						aws.String("shutting-down"),
+						aws.String("stopping"),
+						aws.String("stopped"),
+					},
+				},
+			},
+		}
+		go func() {
+			for {
+				instances, err := svc.DescribeInstances(describeInput)
+
+				noInstances := 0
+
+				if err != nil {
+					continue
+				}
+				for _, res := range instances.Reservations {
+					noInstances = noInstances + len(res.Instances)
+				}
+				if int64(noInstances) < p.preProvisionPool {
+					go p.startInstanceHibernate(ctx, "default")
+				}
+
+				fmt.Printf("## Number of provisioned instances: %d(ready: %d)\n", noInstances, len(p.preProvisionKeyMap))
+				//fmt.Printf("## ERR: %+v\n## INSTANCES%+v\n", err, instances)
+				time.Sleep(5000 * time.Millisecond)
+			}
+		}()
+	}
+
 	return nil
 }
 
