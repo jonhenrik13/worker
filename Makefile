@@ -74,7 +74,8 @@ coverage.coverprofile: $(COVERPROFILES)
 	$(GO) tool cover -func=$@
 
 .PHONY: build
-build: vendor/.deps-fetched
+#build: vendor/.deps-fetched
+build:
 	$(GO) install -tags netgo -ldflags "$(GOBUILD_LDFLAGS)" $(ALL_PACKAGES)
 
 .PHONY: crossbuild
@@ -99,7 +100,8 @@ distclean: clean
 	rm -rf vendor/.deps-fetched build/
 
 .PHONY: deps
-deps: .ensure-shfmt .ensure-gometalinter .ensure-gvt vendor/.deps-fetched
+#deps: .ensure-shfmt .ensure-gometalinter .ensure-gvt vendor/.deps-fetched
+deps: .ensure-shfmt .ensure-gometalinter .ensure-gvt
 
 vendor/.deps-fetched: vendor/manifest
 	$(GVT) rebuild
