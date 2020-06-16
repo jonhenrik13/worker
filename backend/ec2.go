@@ -265,7 +265,7 @@ func newEC2Provider(cfg *config.ProviderConfig) (Provider, error) {
 	if cfg.IsSet("KEY_NAME") {
 		keyName = cfg.Get("KEY_NAME")
 	}
-
+  
 	iamInstanceProfileArn := ""
 	if cfg.IsSet("IAM_INSTANCE_PROFILE") {
 		iamInstanceProfileArn = cfg.Get("IAM_INSTANCE_PROFILE")
