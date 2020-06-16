@@ -94,24 +94,25 @@ func init() {
 }
 
 type ec2Provider struct {
-	cfg              *config.ProviderConfig
-	execCmd          []string
-	imageSelector    image.Selector
-	awsSession       *session.Session
-	instanceType     string
-	defaultImage     string
-	securityGroups   []string
-	ebsOptimized     bool
-	diskSize         int64
-	uploadRetries    uint64
-	uploadRetrySleep time.Duration
-	sshDialTimeout   time.Duration
-	publicIP         bool
-	publicIPConnect  bool
-	subnetID         string
-	keyName          string
-	userData         string
-	customTags       map[string]string
+	cfg                   *config.ProviderConfig
+	execCmd               []string
+	imageSelector         image.Selector
+	awsSession            *session.Session
+	instanceType          string
+	defaultImage          string
+	securityGroups        []string
+	ebsOptimized          bool
+	diskSize              int64
+	uploadRetries         uint64
+	uploadRetrySleep      time.Duration
+	sshDialTimeout        time.Duration
+	publicIP              bool
+	publicIPConnect       bool
+	subnetID              string
+	keyName               string
+	iamInstanceProfileArn string
+	userData              string
+	customTags            map[string]string
 }
 
 func newEC2Provider(cfg *config.ProviderConfig) (Provider, error) {
@@ -265,25 +266,31 @@ func newEC2Provider(cfg *config.ProviderConfig) (Provider, error) {
 		keyName = cfg.Get("KEY_NAME")
 	}
 
+	iamInstanceProfileArn := ""
+	if cfg.IsSet("IAM_INSTANCE_PROFILE") {
+		iamInstanceProfileArn = cfg.Get("IAM_INSTANCE_PROFILE")
+	}
+
 	return &ec2Provider{
-		cfg:              cfg,
-		sshDialTimeout:   sshDialTimeout,
-		execCmd:          execCmd,
-		imageSelector:    imageSelector,
-		awsSession:       awsSession,
-		instanceType:     instanceType,
-		defaultImage:     defaultImage,
-		securityGroups:   securityGroups,
-		ebsOptimized:     ebsOptimized,
-		diskSize:         diskSize,
-		uploadRetries:    uploadRetries,
-		uploadRetrySleep: uploadRetrySleep,
-		publicIP:         publicIP,
-		publicIPConnect:  publicIPConnect,
-		subnetID:         subnetID,
-		userData:         userData,
-		keyName:          keyName,
-		customTags:       customTags,
+		cfg:                   cfg,
+		sshDialTimeout:        sshDialTimeout,
+		execCmd:               execCmd,
+		imageSelector:         imageSelector,
+		awsSession:            awsSession,
+		instanceType:          instanceType,
+		defaultImage:          defaultImage,
+		securityGroups:        securityGroups,
+		ebsOptimized:          ebsOptimized,
+		diskSize:              diskSize,
+		uploadRetries:         uploadRetries,
+		uploadRetrySleep:      uploadRetrySleep,
+		publicIP:              publicIP,
+		publicIPConnect:       publicIPConnect,
+		subnetID:              subnetID,
+		userData:              userData,
+		keyName:               keyName,
+		iamInstanceProfileArn: iamInstanceProfileArn,
+		customTags:            customTags,
 	}, nil
 }
 
@@ -441,13 +448,16 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 		keyName = aws.String(p.keyName)
 	}
 	//RequestSpotInstances
-
 	runOpts := &ec2.RunInstancesInput{
-		ImageId:             aws.String(imageID),
-		InstanceType:        aws.String(p.instanceType),
-		MaxCount:            aws.Int64(1),
-		MinCount:            aws.Int64(1),
-		KeyName:             keyName,
+		ImageId:      aws.String(imageID),
+		InstanceType: aws.String(p.instanceType),
+		MaxCount:     aws.Int64(1),
+		MinCount:     aws.Int64(1),
+		KeyName:      keyName,
+		IamInstanceProfile: &ec2.IamInstanceProfileSpecification{
+			Arn:  aws.String(p.iamInstanceProfileArn),
+			Name: nil,
+		},
 		EbsOptimized:        aws.Bool(p.ebsOptimized),
 		UserData:            aws.String(userDataEncoded),
 		BlockDeviceMappings: blockDeviceMappings,
