@@ -21,7 +21,6 @@ import (
 
 	gocontext "context"
 
-	googlecloudtrace "cloud.google.com/go/trace"
 	"contrib.go.opencensus.io/exporter/stackdriver"
 	"go.opencensus.io/trace"
 	"golang.org/x/oauth2/google"
@@ -37,8 +36,13 @@ import (
 	"github.com/travis-ci/worker/backend"
 	"github.com/travis-ci/worker/config"
 	"github.com/travis-ci/worker/context"
+	"github.com/travis-ci/worker/image"
 	travismetrics "github.com/travis-ci/worker/metrics"
 	cli "gopkg.in/urfave/cli.v1"
+)
+
+const (
+	scopeTraceAppend = "https://www.googleapis.com/auth/trace.append"
 )
 
 var (
@@ -47,8 +51,8 @@ var (
 
 // CLI is the top level of execution for the whole shebang
 type CLI struct {
-	c        *cli.Context
-	id       string
+	c *cli.Context
+
 	bootTime time.Time
 
 	ctx    gocontext.Context
@@ -110,6 +114,27 @@ func (i *CLI) Setup() (bool, error) {
 			fmt.Println(b.Alias)
 		})
 		return false, nil
+	}
+
+	if i.c.Bool("update-images") {
+		baseURL, err := url.Parse(i.Config.ProviderConfig.Get("IMAGE_SELECTOR_URL"))
+		if err != nil {
+			return false, err
+		}
+
+		imageBaseURL, err := url.Parse(i.Config.ProviderConfig.Get("IMAGE_BASE_URL"))
+		if err != nil {
+			return false, err
+		}
+
+		selector := image.NewAPISelector(baseURL)
+		manager := image.NewManager(ctx, selector, imageBaseURL)
+		err = manager.Update(ctx)
+		if err != nil {
+			logger.WithField("err", err).Error("failed to update images")
+		}
+
+		return false, err
 	}
 
 	logger.WithField("cfg", fmt.Sprintf("%#v", i.Config)).Debug("read config")
@@ -179,7 +204,7 @@ func (i *CLI) Setup() (bool, error) {
 		go func() {
 			httpAddr := i.c.String("remote-controller-addr")
 			i.logger.Info("listening at ", httpAddr)
-			http.ListenAndServe(httpAddr, nil)
+			_ = http.ListenAndServe(httpAddr, nil)
 		}()
 	}
 
@@ -221,7 +246,7 @@ func (i *CLI) Run() {
 		"logwriter_factory": i.LogWriterFactory,
 	}).Debug("running pool")
 
-	i.ProcessorPool.Run(i.Config.PoolSize, i.JobQueue, i.LogWriterFactory)
+	_ = i.ProcessorPool.Run(i.Config.PoolSize, i.JobQueue, i.LogWriterFactory)
 
 	err := i.JobQueue.Cleanup()
 	if err != nil {
@@ -349,7 +374,7 @@ func (i *CLI) setupMetrics() {
 
 func loadStackdriverTraceJSON(ctx gocontext.Context, stackdriverTraceAccountJSON string) (*google.Credentials, error) {
 	if stackdriverTraceAccountJSON == "" {
-		creds, err := google.FindDefaultCredentials(ctx, googlecloudtrace.ScopeTraceAppend)
+		creds, err := google.FindDefaultCredentials(ctx, scopeTraceAppend)
 		return creds, errors.Wrap(err, "could not build default client")
 	}
 
@@ -358,7 +383,7 @@ func loadStackdriverTraceJSON(ctx gocontext.Context, stackdriverTraceAccountJSON
 		return nil, err
 	}
 
-	creds, err := google.CredentialsFromJSON(ctx, credBytes, googlecloudtrace.ScopeTraceAppend)
+	creds, err := google.CredentialsFromJSON(ctx, credBytes, scopeTraceAppend)
 	if err != nil {
 		return nil, err
 	}
@@ -681,6 +706,7 @@ func (i *CLI) buildAMQPJobQueueAndCanceller() (*AMQPJobQueue, *AMQPCanceller, er
 
 	jobQueue.DefaultLanguage = i.Config.DefaultLanguage
 	jobQueue.DefaultDist = i.Config.DefaultDist
+	jobQueue.DefaultArch = i.Config.DefaultArch
 	jobQueue.DefaultGroup = i.Config.DefaultGroup
 	jobQueue.DefaultOS = i.Config.DefaultOS
 
@@ -704,6 +730,7 @@ func (i *CLI) buildHTTPJobQueue() (*HTTPJobQueue, error) {
 
 	jobQueue.DefaultLanguage = i.Config.DefaultLanguage
 	jobQueue.DefaultDist = i.Config.DefaultDist
+	jobQueue.DefaultArch = i.Config.DefaultArch
 	jobQueue.DefaultGroup = i.Config.DefaultGroup
 	jobQueue.DefaultOS = i.Config.DefaultOS
 
@@ -719,6 +746,7 @@ func (i *CLI) buildFileJobQueue() (*FileJobQueue, error) {
 
 	jobQueue.DefaultLanguage = i.Config.DefaultLanguage
 	jobQueue.DefaultDist = i.Config.DefaultDist
+	jobQueue.DefaultArch = i.Config.DefaultArch
 	jobQueue.DefaultGroup = i.Config.DefaultGroup
 	jobQueue.DefaultOS = i.Config.DefaultOS
 

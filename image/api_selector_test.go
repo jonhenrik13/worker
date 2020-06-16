@@ -107,6 +107,7 @@ var (
 					&tagSet{[]string{"dist:precise", "language_ruby:true"}, false, uint64(4), "corp/frob"},
 					&tagSet{[]string{"group_edge:true", "language_ruby:true"}, false, uint64(4), "corp/frob"},
 					&tagSet{[]string{"language_ruby:true", "os:linux"}, false, uint64(4), "corp/frob"},
+					&tagSet{[]string{"dist:precise"}, false, uint64(4), "corp/frob"},
 					&tagSet{[]string{"language_ruby:true"}, true, uint64(4), "corp/frob"},
 					&tagSet{[]string{"dist:precise"}, true, uint64(4), "corp/frob"},
 					&tagSet{[]string{"group_edge:true"}, true, uint64(4), "corp/frob"},
@@ -135,6 +136,7 @@ var (
 					&tagSet{[]string{"dist:yosammity", "language_node_js:true"}, false, uint64(4), "corp/frob"},
 					&tagSet{[]string{"group_fancy:true", "language_node_js:true"}, false, uint64(4), "corp/frob"},
 					&tagSet{[]string{"language_node_js:true", "os:osx"}, false, uint64(4), "corp/frob"},
+					&tagSet{[]string{"dist:yosammity"}, false, uint64(4), "corp/frob"},
 					&tagSet{[]string{"language_node_js:true"}, true, uint64(4), "corp/frob"},
 					&tagSet{[]string{"osx_image:xcode6.1"}, true, uint64(4), "corp/frob"},
 					&tagSet{[]string{"dist:yosammity"}, true, uint64(4), "corp/frob"},
@@ -153,7 +155,7 @@ func TestNewAPISelector(t *testing.T) {
 
 func TestAPISelector_Select(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		fmt.Fprintf(w, testAPIServerString)
+		fmt.Fprint(w, testAPIServerString)
 	}))
 	defer ts.Close()
 
@@ -174,7 +176,7 @@ func TestAPISelector_Select(t *testing.T) {
 
 func TestAPISelector_SelectDefault(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		fmt.Fprintf(w, testAPIServerEmptyResponseString)
+		fmt.Fprint(w, testAPIServerEmptyResponseString)
 	}))
 	defer ts.Close()
 	u, _ := url.Parse(ts.URL)
@@ -210,7 +212,7 @@ func TestAPISelector_SelectDefaultWhenBadJSON(t *testing.T) {
 
 func TestAPISelector_SelectTrailingComma(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		fmt.Fprintf(w, testAPIServerString)
+		fmt.Fprint(w, testAPIServerString)
 	}))
 	defer ts.Close()
 

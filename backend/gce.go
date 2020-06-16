@@ -84,6 +84,7 @@ var (
 		"DEFAULT_LANGUAGE":       fmt.Sprintf("default language to use when looking up image (default %q)", defaultGCELanguage),
 		"DETERMINISTIC_HOSTNAME": "assign deterministic hostname based on repo slug and job id (default false)",
 		"DISK_SIZE":              fmt.Sprintf("disk size in GB (default %v)", defaultGCEDiskSize),
+		"DISK_SIZE_WINDOWS":      "disk size in GB for windows OS (defaults to DISK_SIZE value)",
 		"GPU_COUNT":              fmt.Sprintf("number of GPUs to use (default %v)", defaultGCEGpuCount),
 		"GPU_TYPE":               fmt.Sprintf("type of GPU to use (default %q)", defaultGCEGpuType),
 		"IMAGE_ALIASES":          "comma-delimited strings used as stable names for images, used only when image selector type is \"env\"",
@@ -119,7 +120,8 @@ var (
 		"WARMER_URL":            "URL for warmer service",
 		"WARMER_TIMEOUT":        fmt.Sprintf("timeout for requests to warmer service (default %v)", defaultGCEWarmerTimeout),
 		"WARMER_SSH_PASSPHRASE": fmt.Sprintf("The passphrase used to decipher instace SSH keys"),
-		"ZONE":                  fmt.Sprintf("zone name (default %q)", defaultGCEZone),
+		"ZONE":                  fmt.Sprintf("[DEPRECATED] Use ZONES instead. Zone name (default %q)", defaultGCEZone),
+		"ZONES":                 fmt.Sprintf("comma-delimited list of zone names (default %q)", defaultGCEZone),
 	}
 
 	errGCEMissingIPAddressError   = fmt.Errorf("no IP address found")
@@ -194,8 +196,6 @@ type gceProvider struct {
 	bootPrePollSleep      time.Duration
 	defaultLanguage       string
 	defaultImage          string
-	defaultGpuCount       int64
-	defaultGpuType        string
 	uploadRetries         uint64
 	uploadRetrySleep      time.Duration
 	sshDialer             ssh.Dialer
@@ -214,11 +214,12 @@ type gceProvider struct {
 type gceInstanceConfig struct {
 	MachineType        string
 	PremiumMachineType string
-	Zone               *compute.Zone
+	Zones              []*compute.Zone
 	Network            *compute.Network
 	Subnetwork         *compute.Subnetwork
 	AcceleratorConfig  *compute.AcceleratorConfig
 	DiskSize           int64
+	DiskSizeWindows    int64
 	SSHPubKey          string
 	AutoImplode        bool
 	HardTimeoutMinutes int64
@@ -240,7 +241,7 @@ func (gsmw *gceStartMultistepWrapper) Run(multistep.StateBag) multistep.StepActi
 	return gsmw.f(gsmw.c)
 }
 
-func (gsmw *gceStartMultistepWrapper) Cleanup(multistep.StateBag) { return }
+func (gsmw *gceStartMultistepWrapper) Cleanup(multistep.StateBag) {}
 
 type gceStartContext struct {
 	startAttributes      *StartAttributes
@@ -267,7 +268,7 @@ type gceInstance struct {
 	client   *compute.Service
 	provider *gceProvider
 	instance *compute.Instance
-	ic       *gceInstanceConfig
+	//ic       *gceInstanceConfig
 
 	progresser Progresser
 	sshDialer  ssh.Dialer
@@ -300,7 +301,7 @@ func (gismw *gceInstanceStopMultistepWrapper) Run(multistep.StateBag) multistep.
 	return gismw.f(gismw.c)
 }
 
-func (gismw *gceInstanceStopMultistepWrapper) Cleanup(multistep.StateBag) { return }
+func (gismw *gceInstanceStopMultistepWrapper) Cleanup(multistep.StateBag) {}
 
 func newGCEProvider(cfg *config.ProviderConfig) (Provider, error) {
 	var (
@@ -328,18 +329,25 @@ func newGCEProvider(cfg *config.ProviderConfig) (Provider, error) {
 		imageProjectID = cfg.Get("IMAGE_PROJECT_ID")
 	}
 
-	zoneName := defaultGCEZone
+	zoneNames := []string{defaultGCEZone}
 	if metadata.OnGCE() {
-		zoneName, err = metadata.Zone()
+		zoneName, err := metadata.Zone()
 		if err != nil {
 			return nil, errors.Wrap(err, "could not get zone from metadata api")
 		}
-	}
-	if cfg.IsSet("ZONE") {
-		zoneName = cfg.Get("ZONE")
+		zoneNames = []string{zoneName}
 	}
 
-	cfg.Set("ZONE", zoneName)
+	// For compatibility, should be removed later
+	if cfg.IsSet("ZONE") {
+		zoneNames = strings.Split(cfg.Get("ZONE"), ",")
+	}
+
+	if cfg.IsSet("ZONES") {
+		zoneNames = strings.Split(cfg.Get("ZONES"), ",")
+	}
+
+	cfg.Set("ZONES", strings.Join(zoneNames, ","))
 
 	mtName := defaultGCEMachineType
 	if cfg.IsSet("MACHINE_TYPE") {
@@ -363,6 +371,14 @@ func newGCEProvider(cfg *config.ProviderConfig) (Provider, error) {
 		ds, err := strconv.ParseInt(cfg.Get("DISK_SIZE"), 10, 64)
 		if err == nil {
 			diskSize = ds
+		}
+	}
+
+	diskSizeWindows := diskSize
+	if cfg.IsSet("DISK_SIZE_WINDOWS") {
+		ds, err := strconv.ParseInt(cfg.Get("DISK_SIZE_WINDOWS"), 10, 64)
+		if err == nil {
+			diskSizeWindows = ds
 		}
 	}
 
@@ -609,6 +625,7 @@ func newGCEProvider(cfg *config.ProviderConfig) (Provider, error) {
 			PublicIP:           publicIP,
 			PublicIPConnect:    publicIPConnect,
 			DiskSize:           diskSize,
+			DiskSizeWindows:    diskSizeWindows,
 			SSHPubKey:          string(pubKey),
 			AutoImplode:        autoImplode,
 			StopPollSleep:      stopPollSleep,
@@ -618,6 +635,7 @@ func newGCEProvider(cfg *config.ProviderConfig) (Provider, error) {
 			AcceleratorConfig:  defaultAcceleratorConfig,
 			MachineType:        mtName,
 			PremiumMachineType: premiumMTName,
+			Zones:              []*compute.Zone{},
 		},
 
 		backoffRetryMax:       backoffRetryMax,
@@ -699,28 +717,32 @@ func (p *gceProvider) apiRateLimit(ctx gocontext.Context) error {
 func (p *gceProvider) Setup(ctx gocontext.Context) error {
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/gce_provider")
 
-	logger.WithField("zone", p.cfg.Get("ZONE")).Debug("resolving configured zone")
+	logger.WithField("zones", p.cfg.Get("ZONES")).Debug("resolving configured zone")
 
-	err := p.backoffRetry(ctx, func() error {
-		p.apiRateLimit(ctx)
-		zone, zErr := p.client.Zones.
-			Get(p.projectID, p.cfg.Get("ZONE")).
-			Context(ctx).
-			Do()
-		if zErr == nil {
-			p.ic.Zone = zone
+	for _, zoneName := range strings.Split(p.cfg.Get("ZONES"), ",") {
+		err := p.backoffRetry(ctx, func() error {
+			_ = p.apiRateLimit(ctx)
+
+			zone, zErr := p.client.Zones.
+				Get(p.projectID, zoneName).
+				Context(ctx).
+				Do()
+			if zErr == nil {
+				p.ic.Zones = append(p.ic.Zones, zone)
+			}
+			return zErr
+		})
+
+		if err != nil {
+			return errors.Wrap(err, "failed to resolve configured zone")
 		}
-		return zErr
-	})
 
-	if err != nil {
-		return errors.Wrap(err, "failed to resolve configured zone")
 	}
 
 	logger.WithField("network", p.cfg.Get("NETWORK")).Debug("resolving configured network")
 
-	err = p.backoffRetry(ctx, func() error {
-		p.apiRateLimit(ctx)
+	err := p.backoffRetry(ctx, func() error {
+		_ = p.apiRateLimit(ctx)
 		nw, nwErr := p.client.Networks.
 			Get(p.projectID, p.cfg.Get("NETWORK")).
 			Context(ctx).
@@ -737,11 +759,11 @@ func (p *gceProvider) Setup(ctx gocontext.Context) error {
 
 	region := defaultGCERegion
 	if metadata.OnGCE() {
-		logger.WithField("region", p.ic.Zone.Region).Debug("setting region from zone when on gce")
-		region = p.ic.Zone.Region
+		logger.WithField("region", p.ic.Zones[0].Region).Debug("setting region from zone when on gce")
+		region = p.ic.Zones[0].Region
 	}
 	if p.cfg.IsSet("REGION") {
-		logger.WithField("region", p.ic.Zone.Region).Debug("setting region from config")
+		logger.WithField("region", p.ic.Zones[0].Region).Debug("setting region from config")
 		region = p.cfg.Get("REGION")
 	}
 
@@ -749,7 +771,7 @@ func (p *gceProvider) Setup(ctx gocontext.Context) error {
 		logger.WithField("subnetwork", p.cfg.Get("SUBNETWORK")).Debug("resolving configured subnetwork")
 
 		err = p.backoffRetry(ctx, func() error {
-			p.apiRateLimit(ctx)
+			_ = p.apiRateLimit(ctx)
 			sn, snErr := p.client.Subnetworks.
 				Get(p.projectID, region, p.cfg.Get("SUBNETWORK")).
 				Context(ctx).
@@ -767,11 +789,11 @@ func (p *gceProvider) Setup(ctx gocontext.Context) error {
 
 	logger.Debug("finding alternate zones")
 	err = p.backoffRetry(ctx, func() error {
-		p.apiRateLimit(ctx)
+		_ = p.apiRateLimit(ctx)
 		zl, zlErr := p.client.Zones.List(p.projectID).
 			Context(ctx).
 			Filter("status eq UP").
-			Filter(fmt.Sprintf("region eq %s", p.ic.Zone.Region)).Do()
+			Filter(fmt.Sprintf("region eq %s", p.ic.Zones[0].Region)).Do()
 
 		if zlErr != nil {
 			return zlErr
@@ -791,7 +813,12 @@ func (p *gceProvider) Setup(ctx gocontext.Context) error {
 
 	logger.Debug("building machine type self link map")
 
-	for _, zoneName := range append([]string{p.ic.Zone.Name}, p.alternateZones...) {
+	zoneNames := make([]string, len(p.ic.Zones))
+	for i, zone := range p.ic.Zones {
+		zoneNames[i] = zone.Name
+	}
+
+	for _, zoneName := range append(zoneNames, p.alternateZones...) {
 		for _, machineType := range []string{p.ic.MachineType, p.ic.PremiumMachineType} {
 			if zoneName == "" || machineType == "" {
 				continue
@@ -805,7 +832,7 @@ func (p *gceProvider) Setup(ctx gocontext.Context) error {
 			}).Debug("finding machine type self link")
 
 			err = p.backoffRetry(ctx, func() error {
-				p.apiRateLimit(ctx)
+				_ = p.apiRateLimit(ctx)
 
 				mt, mtErr := p.client.MachineTypes.
 					Get(p.projectID, zoneName, machineType).
@@ -813,16 +840,26 @@ func (p *gceProvider) Setup(ctx gocontext.Context) error {
 					Do()
 				if mtErr == nil {
 					p.machineTypeSelfLinks[key] = mt.SelfLink
-					return nil
 				}
+
 				return mtErr
 			})
 
 			if err != nil {
-				return errors.Wrap(err, "failed to find machine type self link")
+				logger.WithFields(logrus.Fields{
+					"err":          err,
+					"zone":         zoneName,
+					"machine_type": machineType,
+					"key":          key,
+				}).Warn("failed to find machine type self link")
 			}
 		}
 	}
+
+	if len(p.machineTypeSelfLinks) == 0 {
+		return errors.New("failed to find any machine type self link")
+	}
+
 	logger.WithField("map", p.machineTypeSelfLinks).Debug("built machine type self link map")
 
 	return err
@@ -915,7 +952,7 @@ func (p *gceProvider) StartWithProgress(ctx gocontext.Context, startAttributes *
 
 	c := &gceStartContext{
 		startAttributes:    startAttributes,
-		zoneName:           p.ic.Zone.Name,
+		zoneName:           p.pickRandomZone(),
 		machineType:        p.ic.MachineType,
 		premiumMachineType: p.ic.PremiumMachineType,
 		progresser:         progresser,
@@ -969,9 +1006,7 @@ func (p *gceProvider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 }
 
 func (p *gceProvider) stepGetImage(c *gceStartContext) multistep.StepAction {
-	ctx := c.ctx
-
-	ctx, span := trace.StartSpan(ctx, "GCE.GetImage")
+	_, span := trace.StartSpan(c.ctx, "GCE.GetImage")
 	defer span.End()
 
 	image, err := p.imageSelect(c.ctx, c.startAttributes)
@@ -1002,9 +1037,7 @@ func makeWindowsPassword() (string, error) {
 }
 
 func (p *gceProvider) stepRenderScript(c *gceStartContext) multistep.StepAction {
-	ctx := c.ctx
-
-	ctx, span := trace.StartSpan(ctx, "GCE.RenderScript")
+	_, span := trace.StartSpan(c.ctx, "GCE.RenderScript")
 	defer span.End()
 
 	scriptBuf := bytes.Buffer{}
@@ -1053,7 +1086,7 @@ func (p *gceProvider) stepInsertInstance(c *gceStartContext) multistep.StepActio
 
 	if c.startAttributes.VMConfig.Zone != "" {
 		err := p.backoffRetry(ctx, func() error {
-			p.apiRateLimit(ctx)
+			_ = p.apiRateLimit(ctx)
 			zone, zErr := p.client.Zones.Get(p.projectID, c.startAttributes.VMConfig.Zone).Context(ctx).Do()
 			if zErr != nil {
 				return zErr
@@ -1144,7 +1177,7 @@ func (p *gceProvider) stepInsertInstance(c *gceStartContext) multistep.StepActio
 	}
 
 	err = p.backoffRetry(c.ctx, func() error {
-		p.apiRateLimit(c.ctx)
+		_ = p.apiRateLimit(c.ctx)
 
 		op, insErr := p.client.Instances.Insert(p.projectID, c.zoneName, c.instance).Context(c.ctx).Do()
 		if insErr != nil {
@@ -1248,7 +1281,7 @@ func (p *gceProvider) stepWaitForInstanceIP(c *gceStartContext) multistep.StepAc
 		zoneOp := &compute.Operation{}
 
 		err := p.backoffRetry(ctx, func() error {
-			p.apiRateLimit(c.ctx)
+			_ = p.apiRateLimit(c.ctx)
 			op, zoErr := p.client.ZoneOperations.
 				Get(p.projectID, c.zoneName, c.instanceInsertOpName).
 				Context(ctx).
@@ -1338,7 +1371,7 @@ func (p *gceProvider) imageByFilter(ctx gocontext.Context, filter string) (*comp
 	imageNames := []string{}
 
 	err := p.backoffRetry(ctx, func() error {
-		p.apiRateLimit(ctx)
+		_ = p.apiRateLimit(ctx)
 		images, ilErr := p.client.Images.List(p.imageProjectID).Filter(filter).Context(ctx).Do()
 		if ilErr != nil {
 			return ilErr
@@ -1441,14 +1474,19 @@ func (p *gceProvider) buildInstance(ctx gocontext.Context, c *gceStartContext) (
 		Zone:        c.zoneName,
 	}
 
+	diskSize := p.ic.DiskSize
+	if c.startAttributes.OS == "windows" {
+		diskSize = p.ic.DiskSizeWindows
+	}
+
 	diskInitParams := &compute.AttachedDiskInitializeParams{
 		SourceImage: c.image.SelfLink,
 		DiskType:    gcePdSSDForZone(c.zoneName),
-		DiskSizeGb:  p.ic.DiskSize,
+		DiskSizeGb:  diskSize,
 	}
 
 	inst.Disks = []*compute.AttachedDisk{
-		&compute.AttachedDisk{
+		{
 			Type:             "PERSISTENT",
 			Mode:             "READ_WRITE",
 			Boot:             true,
@@ -1489,9 +1527,9 @@ func (p *gceProvider) buildInstance(ctx gocontext.Context, c *gceStartContext) (
 
 	if p.ic.PublicIP {
 		inst.NetworkInterfaces = []*compute.NetworkInterface{
-			&compute.NetworkInterface{
+			{
 				AccessConfigs: []*compute.AccessConfig{
-					&compute.AccessConfig{
+					{
 						Name: "AccessConfig brought to you by travis-worker",
 						Type: "ONE_TO_ONE_NAT",
 					},
@@ -1503,7 +1541,7 @@ func (p *gceProvider) buildInstance(ctx gocontext.Context, c *gceStartContext) (
 	} else {
 		inst.Tags.Items = append(inst.Tags.Items, "no-ip")
 		inst.NetworkInterfaces = []*compute.NetworkInterface{
-			&compute.NetworkInterface{
+			{
 				Network:    p.ic.Network.SelfLink,
 				Subnetwork: subnetwork,
 			},
@@ -1517,7 +1555,7 @@ func (p *gceProvider) buildInstance(ctx gocontext.Context, c *gceStartContext) (
 
 	inst.Metadata = &compute.Metadata{
 		Items: []*compute.MetadataItems{
-			&compute.MetadataItems{
+			{
 				Key:   startupKey,
 				Value: googleapi.String(c.script),
 			},
@@ -1545,7 +1583,7 @@ func (p *gceProvider) buildInstance(ctx gocontext.Context, c *gceStartContext) (
 		inst.Scheduling.OnHostMaintenance = "TERMINATE"
 	}
 
-	if p.ic.Preemptible == true && inst.Scheduling.OnHostMaintenance == "MIGRATE" {
+	if p.ic.Preemptible && inst.Scheduling.OnHostMaintenance == "MIGRATE" {
 		// googleapi: Scheduling must have preemptible be false when OnHostMaintenance isn't TERMINATE.
 		// In other words: if preemptible is true, OnHostMaintenance must be TERMINATE.
 		logger.Warn("PREEMPTIBLE is set to true; forcing onHostMaintenance to TERMINATE")
@@ -1620,6 +1658,12 @@ func (p *gceProvider) warmerRequestInstance(ctx gocontext.Context, zone string, 
 	return warmerRes, nil
 }
 
+func (p *gceProvider) pickRandomZone() string {
+	mathrand.Seed(time.Now().Unix())
+
+	return p.ic.Zones[mathrand.Intn(len(p.ic.Zones))].Name
+}
+
 func (p *gceProvider) pickAlternateZone(zoneName string) string {
 	if len(p.alternateZones) == 0 {
 		return zoneName
@@ -1644,7 +1688,7 @@ func (p *gceProvider) setStartContextZone(c *gceStartContext, zoneName string) {
 	}
 
 	c.instance.Zone = zoneName
-	c.instance.MachineType, _ = p.machineTypeSelfLinks[gceMtKey(zoneName, c.instance.MachineType)]
+	c.instance.MachineType = p.machineTypeSelfLinks[gceMtKey(zoneName, c.instance.MachineType)]
 
 	for _, disk := range c.instance.Disks {
 		if disk.InitializeParams == nil {
@@ -1782,7 +1826,7 @@ func (i *gceInstance) refreshInstance(ctx gocontext.Context) error {
 		}).Debug("refreshing instance")
 
 	return i.provider.backoffRetry(ctx, func() error {
-		i.provider.apiRateLimit(ctx)
+		_ = i.provider.apiRateLimit(ctx)
 		inst, err := i.client.Instances.
 			Get(i.projectID, zone, i.instance.Name).
 			Context(ctx).
@@ -1928,7 +1972,7 @@ func (i *gceInstance) isPreempted(ctx gocontext.Context) (bool, error) {
 	preempted := &(struct{ state bool }{state: false})
 
 	err := i.provider.backoffRetry(ctx, func() error {
-		i.provider.apiRateLimit(ctx)
+		_ = i.provider.apiRateLimit(ctx)
 		list, err := i.provider.client.GlobalOperations.
 			AggregatedList(i.provider.projectID).
 			Filter(fmt.Sprintf("targetId eq %d", i.instance.Id)).
@@ -2084,7 +2128,7 @@ func (i *gceInstance) stepWaitForInstanceDeleted(c *gceInstanceStopContext) mult
 	span.End()
 
 	err := i.provider.backoffRetry(ctx, func() error {
-		i.provider.apiRateLimit(c.ctx)
+		_ = i.provider.apiRateLimit(c.ctx)
 		zoneOp, err := i.client.ZoneOperations.
 			Get(i.projectID, i.getZoneName(), c.instanceDeleteOp.Name).
 			Do()
