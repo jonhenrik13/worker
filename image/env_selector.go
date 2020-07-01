@@ -2,6 +2,7 @@ package image
 
 import (
 	gocontext "context"
+	"regexp"
 	"strings"
 
 	"github.com/travis-ci/worker/config"
@@ -40,7 +41,6 @@ func (es *EnvSelector) Select(ctx gocontext.Context, params *Params) (string, er
 		if key == "" {
 			continue
 		}
-
 		if s, ok := es.lookup[key]; ok {
 			imageName = s
 			break
@@ -64,10 +64,12 @@ func (es *EnvSelector) buildCandidateKeys(params *Params) []string {
 	hasOS := params.OS != ""
 
 	if params.OS == "osx" && params.OsxImage != "" {
+		reg, _ := regexp.Compile("[^A-Za-z0-9]+")
+		osxImage := reg.ReplaceAllString(params.OsxImage, "_")
 		if hasLang {
-			candidateKeys = append(candidateKeys, "osx_image_"+params.OsxImage+"_"+params.Language)
+			candidateKeys = append(candidateKeys, "osx_image_"+osxImage+"_"+params.Language)
 		}
-		candidateKeys = append(candidateKeys, "osx_image_"+params.OsxImage)
+		candidateKeys = append(candidateKeys, "osx_image_"+osxImage)
 	}
 
 	if hasDist && hasGroup && hasLang {
