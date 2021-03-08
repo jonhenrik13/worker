@@ -3,7 +3,7 @@ module github.com/travis-ci/worker
 go 1.12
 
 require (
-	cloud.google.com/go v0.26.0
+	cloud.google.com/go v0.54.0
 	contrib.go.opencensus.io/exporter/stackdriver v0.5.0
 	github.com/Azure/go-ansiterm v0.0.0-20170929234023-d6e3b3328b78 // indirect
 	github.com/Azure/go-ntlmssp v0.0.0-20180810175552-4a21cbd618b4 // indirect
@@ -57,13 +57,12 @@ require (
 	github.com/smartystreets/goconvey v0.0.0-20190330032615-68dc04aab96a // indirect
 	github.com/streadway/amqp v0.0.0-20180806233856-70e15c650864
 	github.com/stretchr/testify v1.6.1
-	go.opencensus.io v0.15.0
-	golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9
+	go.opencensus.io v0.22.3
+	golang.org/x/crypto v0.0.0-20201002170205-7f63de1d35b0
 	golang.org/x/net v0.0.0-20201110031124-69a78807bb2b
-	golang.org/x/oauth2 v0.0.0-20181003184128-c57b0facaced
-	golang.org/x/sync v0.0.0-20190423024810-112230192c58
-	golang.org/x/time v0.0.0-20180412165947-fbb02b2291d2 // indirect
-	google.golang.org/api v0.0.0-20181012000736-72df7e5ac770
+	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d
+	golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e
+	google.golang.org/api v0.20.0
 	gopkg.in/httprequest.v1 v1.2.0 // indirect
 	gopkg.in/juju/environschema.v1 v1.0.0 // indirect
 	gopkg.in/macaroon-bakery.v2 v2.1.0 // indirect
@@ -74,7 +73,7 @@ require (
 	gotest.tools v2.2.0+incompatible // indirect
 	k8s.io/api v0.20.4
 	k8s.io/apimachinery v0.20.4
-	k8s.io/client-go v11.0.0+incompatible
+	k8s.io/client-go v0.20.4
 	k8s.io/klog v1.0.0 // indirect
 	k8s.io/utils v0.0.0-20210305010621-2afb4311ab10 // indirect
 )
