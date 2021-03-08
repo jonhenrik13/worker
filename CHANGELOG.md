@@ -14,6 +14,26 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/).
 
 ### Fixed
 
+## [6.2.4] - 2019-10-29
+
+### Fixed
+- Specifying an unsupported language routes the build to default image
+
+## [6.2.3] - 2019-10-11
+
+### Added
+- backend/lxd: image selector
+
+## [6.2.2] - 2019-09-30
+
+### Fixed
+- services start support on Bionic for TCI Enterprise in docker
+
+## [6.2.1] - 2019-07-18
+
+### Fixed
+- config/provider_config: Don't unescape \*ACCOUNT_JSON variables.
+
 ## [6.2.0] - 2019-01-09
 
 ### Changed
