@@ -38,7 +38,7 @@ var (
 	defaultEC2InstanceType      = "t2.micro"
 	defaultEC2SecurityGroupIDs  = "default"
 	defaultEC2EBSOptimized      = false
-	defaultEC2DiskSize          = int64(100)
+	defaultEC2DiskSize          = int64(8)
 	defaultEC2UploadRetries     = uint64(120)
 	defaultEC2UploadRetrySleep  = 1 * time.Second
 	defaultEC2Region            = "eu-west-1"
@@ -122,7 +122,7 @@ func newEC2Provider(cfg *config.ProviderConfig) (Provider, error) {
 		}
 		sshDialTimeout = sd
 	}
-	customTags := make(map[string]string)
+	customTags := make(map[string]string, 0)
 	if cfg.IsSet("CUSTOM_TAGS") {
 		items := strings.Split(cfg.Get("CUSTOM_TAGS"), ",")
 		for _, tag := range items {
@@ -504,10 +504,10 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 			}
 
 			instances, lastErr = svc.DescribeInstances(describeInstancesInput)
-			if instances != nil && len(instances.Reservations) > 0 && len(instances.Reservations[0].Instances) > 0 {
+			if instances != nil {
 				instance := instances.Reservations[0].Instances[0]
 				address := *instance.PrivateIpAddress
-				if instance.PublicIpAddress != nil && p.publicIPConnect {
+				if p.publicIPConnect {
 					address = *instance.PublicIpAddress
 				}
 				if address != "" {
@@ -522,9 +522,6 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 			if errCount > p.uploadRetries {
 				instanceChan <- nil
 				return
-			}
-			if reservation.Instances[0].InstanceId != nil {
-				logger.Debugf("instance %s is not ready", *reservation.Instances[0].InstanceId)
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
@@ -636,7 +633,7 @@ func (i *ec2Instance) uploadScriptSCP(ctx gocontext.Context, script []byte) erro
 
 func (i *ec2Instance) sshConnection(ctx gocontext.Context) (ssh.Connection, error) {
 	ip := *i.instance.PrivateIpAddress
-	if i.instance.PublicIpAddress != nil && i.provider.publicIPConnect {
+	if i.provider.publicIPConnect {
 		ip = *i.instance.PublicIpAddress
 	}
 	return i.sshDialer.Dial(fmt.Sprintf("%s:22", ip), defaultEC2SSHUserName, i.provider.sshDialTimeout)
