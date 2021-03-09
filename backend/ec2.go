@@ -504,7 +504,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 			}
 
 			instances, lastErr = svc.DescribeInstances(describeInstancesInput)
-			fmt.Printf("%+v\n", instances)
+
 			if instances != nil &&
 				len(instances.Reservations) > 0 &&
 				instances.Reservations[0] != nil &&
@@ -512,13 +512,23 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 				instance := instances.Reservations[0].Instances[0]
 				address := *instance.PrivateIpAddress
 				if p.publicIPConnect {
-					address = *instance.PublicIpAddress
+					if instance.PublicIpAddress != nil {
+						address = *instance.PublicIpAddress
+					}else{
+						address = ""
+					}
 				}
 				if address != "" {
 					_, lastErr = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", address, 22), 1*time.Second)
+
 					if lastErr == nil {
 						instanceChan <- instance
 						return
+					}else{
+						context.LoggerFromContext(ctx).WithFields(logrus.Fields{
+							"err":  lastErr,
+							"self": "backend/ec2_instance",
+						}).Info("Retrying upload of script")
 					}
 				}
 			}
