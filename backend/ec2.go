@@ -528,7 +528,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 						context.LoggerFromContext(ctx).WithFields(logrus.Fields{
 							"err":  lastErr,
 							"self": "backend/ec2_instance",
-						}).Info("Retrying upload of script")
+						}).Debug("Retrying upload of script")
 					}
 				}
 			}
