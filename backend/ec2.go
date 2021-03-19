@@ -376,16 +376,12 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 	}
 
 	var securityGroups []*string
-	context.LoggerFromContext(ctx).WithFields(logrus.Fields{
-		"self": "backend/ec2_instance",
-		"SG": strings.Join(p.securityGroups," "),
-	}).Info("This is what I got for security groups!!")
-	for _, securityGroup := range p.securityGroups {
+	for i, securityGroup := range p.securityGroups {
 		context.LoggerFromContext(ctx).WithFields(logrus.Fields{
 			"self": "backend/ec2_instance",
 			"SG": securityGroup,
 		}).Info("Adding this security group...")
-		securityGroups = append(securityGroups, &securityGroup)
+		securityGroups = append(securityGroups, &p.securityGroups[i])
 	}
 
 	blockDeviceMappings := []*ec2.BlockDeviceMapping{
