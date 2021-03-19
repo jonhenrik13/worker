@@ -375,7 +375,11 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 		imageID = p.defaultImage
 	}
 
-	securityGroups := []*string{}
+	var securityGroups []*string
+	context.LoggerFromContext(ctx).WithFields(logrus.Fields{
+		"self": "backend/ec2_instance",
+		"SG": strings.Join(p.securityGroups," "),
+	}).Info("This is what I got for security groups!!")
 	for _, securityGroup := range p.securityGroups {
 		securityGroups = append(securityGroups, &securityGroup)
 	}
