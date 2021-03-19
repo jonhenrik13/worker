@@ -528,7 +528,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 						context.LoggerFromContext(ctx).WithFields(logrus.Fields{
 							"err":  lastErr,
 							"self": "backend/ec2_instance",
-						}).Debug("Retrying upload of script")
+						}).Warn("Retrying upload of script")
 					}
 				}
 			}
@@ -593,7 +593,7 @@ func (i *ec2Instance) UploadScript(ctx gocontext.Context, script []byte) error {
 
 			err := i.uploadScriptAttempt(ctx, script)
 			if err != nil {
-				logger.WithError(err).Debug("upload script attempt errored")
+				logger.WithError(err).Warn("upload script attempt errored")
 			} else {
 				uploadedChan <- nil
 				return
