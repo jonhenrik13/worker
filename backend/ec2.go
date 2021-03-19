@@ -347,6 +347,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 	sshDialer, err := ssh.NewDialerWithKeyWithoutPassPhrase([]byte(privateKey))
 
 	if err != nil {
+		logger.WithField("err", err).Error(fmt.Print("NewDialerWithKeyWithoutPassPhrase"))
 		return nil, err
 	}
 
@@ -357,6 +358,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 	})
 
 	if err != nil {
+		logger.WithField("err", err).Error(fmt.Print("Failed to execute ec2 startup script"))
 		return nil, err
 	}
 
@@ -368,6 +370,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 	})
 
 	if err != nil {
+		logger.WithField("err", err).Error(fmt.Print("Failed to select imageId"))
 		return nil, err
 	}
 
@@ -483,6 +486,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 	reservation, err := svc.RunInstances(runOpts)
 
 	if err != nil {
+		logger.WithField("err", err).Error(fmt.Print("Failed to Run Instances"))
 		return nil, err
 	}
 
@@ -681,21 +685,29 @@ func (i *ec2Instance) Stop(ctx gocontext.Context) error {
 		},
 	}
 
+	deleteKeyPairInput := &ec2.DeleteKeyPairInput{
+		KeyName: i.tmpKeyName,
+	}
+
 	_, err := svc.TerminateInstances(instanceTerminationInput)
 
 	if err != nil {
+		logger.WithError(err).Error(fmt.Sprintf("Error terminating instance %s with hostname %s", *i.instance.InstanceId, *i.instance.PrivateDnsName))
+		logger.Info(fmt.Sprint("Trying to delete keypair to avoid leakage"))
+		_, err = svc.DeleteKeyPair(deleteKeyPairInput)
+		if err != nil {
+			logger.WithError(err).Error(fmt.Sprintf("Error deleting keypair %s", *i.tmpKeyName))
+			return err
+		}
 		return err
 	}
 
 	logger.Info(fmt.Sprintf("Terminated instance %s with hostname %s", *i.instance.InstanceId, *i.instance.PrivateDnsName))
 
-	deleteKeyPairInput := &ec2.DeleteKeyPairInput{
-		KeyName: i.tmpKeyName,
-	}
-
 	_, err = svc.DeleteKeyPair(deleteKeyPairInput)
 
 	if err != nil {
+		logger.WithError(err).Error(fmt.Sprintf("Error deleting keypair %s", *i.tmpKeyName))
 		return err
 	}
 
