@@ -11,7 +11,7 @@ require (
 	github.com/Jeffail/tunny v0.0.0-20180304204616-59cfa8fcb19f
 	github.com/Microsoft/go-winio v0.4.11 // indirect
 	github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5 // indirect
-	github.com/aws/aws-sdk-go v1.15.31
+	github.com/aws/aws-sdk-go v1.37.33
 	github.com/bitly/go-simplejson v0.0.0-20171023175154-0c965951289c
 	github.com/cenk/backoff v2.1.0+incompatible
 	github.com/certifi/gocertifi v0.0.0-20180905225744-ee1a9a0726d2 // indirect
@@ -24,7 +24,6 @@ require (
 	github.com/flosch/pongo2 v0.0.0-20190505152737-8914e1cf9164 // indirect
 	github.com/garyburd/redigo v0.0.0-20180404160726-569eae59ada9
 	github.com/getsentry/raven-go v0.0.0-20180903072508-084a9de9eb03
-	github.com/googleapis/gax-go v2.0.0+incompatible // indirect
 	github.com/gorilla/mux v0.0.0-20181012153151-deb579d6e030
 	github.com/gorilla/websocket v1.4.0 // indirect
 	github.com/imdario/mergo v0.3.11 // indirect
@@ -54,7 +53,6 @@ require (
 	github.com/rcrowley/go-metrics v0.0.0-20180503174638-e2704e165165
 	github.com/rogpeppe/fastuuid v1.1.0 // indirect
 	github.com/sirupsen/logrus v0.0.0-20181010200618-458213699411
-	github.com/smartystreets/goconvey v0.0.0-20190330032615-68dc04aab96a // indirect
 	github.com/streadway/amqp v0.0.0-20180806233856-70e15c650864
 	github.com/stretchr/testify v1.6.1
 	go.opencensus.io v0.22.3
@@ -74,7 +72,6 @@ require (
 	k8s.io/api v0.20.4
 	k8s.io/apimachinery v0.20.4
 	k8s.io/client-go v0.20.4
-	k8s.io/klog v1.0.0 // indirect
 	k8s.io/utils v0.0.0-20210305010621-2afb4311ab10 // indirect
 )
 
