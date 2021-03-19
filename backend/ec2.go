@@ -480,6 +480,17 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 		runOpts.SecurityGroupIds = securityGroups
 	}
 
+	var sg []string
+
+	for _, value := range runOpts.SecurityGroupIds {
+		sg = append(sg, *value)
+	}
+
+	context.LoggerFromContext(ctx).WithFields(logrus.Fields{
+		"self": "backend/ec2_instance",
+		"SG": strings.Join(sg," "),
+	}).Info("Adding security groups")
+
 	reservation, err := svc.RunInstances(runOpts)
 
 	if err != nil {
