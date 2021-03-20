@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"k8s.io/utils/pointer"
 	"net/http"
 	"net/url"
 	"os"
@@ -289,6 +290,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		},
 		Spec: apiv1.PodSpec{
 			ServiceAccountName: p.defaultServiceAccountName,
+			AutomountServiceAccountToken: pointer.Bool(true),
 			Containers: []apiv1.Container{
 				{
 					Name:    fmt.Sprintf("%s", hostName),
