@@ -53,6 +53,8 @@ var (
 	defaultKubernetesImageSelectorType = imageSelectEnv
 	defaultKubernetesPodTermGrace      = 0
 	defaultKubernetesImage             = "travisci/ci-garnet:packer-1515445631-7dfb2e1"
+
+	defaultKubernetesServiceAccountName = "default"
 )
 
 func init() {
@@ -93,6 +95,8 @@ type kubernetesProvider struct {
 	requestsStorage        string
 	defaultImage           string
 	imageSelector          image.Selector
+
+	defaultServiceAccountName string
 }
 
 func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
@@ -196,6 +200,11 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		defaultImage = cfg.Get("IMAGE_DEFAULT")
 	}
 
+	defaultServiceAccountName := defaultKubernetesServiceAccountName
+	if cfg.IsSet("SERVICE_ACCOUNT_NAME") {
+		defaultServiceAccountName = cfg.Get("SERVICE_ACCOUNT_NAME")
+	}
+
 	return &kubernetesProvider{
 		clientSet:        clientSet,
 		restclientConfig: config,
@@ -212,6 +221,8 @@ func newKubernetesProvider(cfg *config.ProviderConfig) (Provider, error) {
 		requestsCPU:            requestsCPU,
 		requestsStorage:        requestsStorage,
 		defaultImage:           defaultImage,
+
+		defaultServiceAccountName:           defaultServiceAccountName,
 	}, nil
 }
 
@@ -277,6 +288,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 			GenerateName: fmt.Sprintf("%s-", hostName),
 		},
 		Spec: apiv1.PodSpec{
+			ServiceAccountName: p.defaultServiceAccountName,
 			Containers: []apiv1.Container{
 				{
 					Name:    fmt.Sprintf("%s", hostName),
