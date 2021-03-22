@@ -291,6 +291,9 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 		Spec: apiv1.PodSpec{
 			ServiceAccountName: p.defaultServiceAccountName,
 			AutomountServiceAccountToken: pointer.Bool(true),
+			SecurityContext: &apiv1.PodSecurityContext{ // Because of this: https://github.com/kubernetes-sigs/external-dns/pull/1185#issuecomment-530439786
+				FSGroup: pointer.Int64(65534),
+			},
 			Containers: []apiv1.Container{
 				{
 					Name:    fmt.Sprintf("%s", hostName),
