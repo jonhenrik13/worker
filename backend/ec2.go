@@ -35,9 +35,7 @@ var (
 	defaultEC2ImageSelectorType = "env"
 	defaultEC2SSHUserName       = "travis"
 	defaultEC2ExecCmd           = "bash ~/build.sh"
-	defaultEC2SubnetID          = ""
 	defaultEC2InstanceType      = "t2.micro"
-	defaultEC2Image             = "ami-02790d1ebf3b5181d"
 	defaultEC2SecurityGroupIDs  = "default"
 	defaultEC2EBSOptimized      = false
 	defaultEC2DiskSize          = int64(8)
@@ -729,25 +727,31 @@ func (p *ec2Provider) waitForUp(ctx gocontext.Context, instanceId string) (*ec2.
 			var instances *ec2.DescribeInstancesOutput
 
 			instances, lastErr = svc.DescribeInstances(describeInstancesInput)
-			if instances != nil && instances.Reservations != nil {
-				if instances.Reservations[0].Instances != nil {
-					instance := instances.Reservations[0].Instances[0]
-					address := ""
-					if p.publicIPConnect {
-						if instance.PublicIpAddress != nil {
-							address = *instance.PublicIpAddress
-						}
-					} else {
-						if instance.PrivateIpAddress != nil {
-							address = *instance.PrivateIpAddress
-						}
+
+			if instances != nil &&
+				len(instances.Reservations) > 0 &&
+				instances.Reservations[0] != nil &&
+				len(instances.Reservations[0].Instances) > 0 {
+				instance := instances.Reservations[0].Instances[0]
+				address := *instance.PrivateIpAddress
+				if p.publicIPConnect {
+					if instance.PublicIpAddress != nil {
+						address = *instance.PublicIpAddress
+					}else{
+						address = ""
 					}
-					if address != "" {
-						_, lastErr = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", address, 22), 1*time.Second)
-						if lastErr == nil {
-							instanceChan <- instance
-							return
-						}
+				}
+				if address != "" {
+					_, lastErr = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", address, 22), 1*time.Second)
+
+					if lastErr == nil {
+						instanceChan <- instance
+						return
+					}else{
+						context.LoggerFromContext(ctx).WithFields(logrus.Fields{
+							"err":  lastErr,
+							"self": "backend/ec2_instance",
+						}).Debug("Retrying upload of script")
 					}
 				}
 			}
@@ -900,28 +904,6 @@ func (i *ec2Instance) UploadScript(ctx gocontext.Context, script []byte) error {
 	//return i.uploadScriptAttempt(ctx, script)
 }
 
-func (i *ec2Instance) waitForSSH(port, timeout int) error {
-
-	host := *i.instance.PrivateIpAddress
-	if i.provider.publicIPConnect {
-		host = *i.instance.PublicIpAddress
-	}
-
-	iter := 0
-	for {
-		_, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 1*time.Second)
-		if err == nil {
-			break
-		}
-		iter = iter + 1
-		if iter > timeout {
-			return err
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return nil
-}
-
 func (i *ec2Instance) uploadScriptAttempt(ctx gocontext.Context, script []byte) error {
 	return i.uploadScriptSCP(ctx, script)
 }
@@ -967,22 +949,9 @@ func (i *ec2Instance) runScriptSSH(ctx gocontext.Context, output io.Writer) (*Ru
 	return &RunResult{Completed: err != nil, ExitCode: exitStatus}, errors.Wrap(err, "error running script")
 }
 
-func (p *ec2Provider) deleteKeyPair(keyName string) error {
-	svc := ec2.New(p.awsSession)
-	deleteKeyPairInput := &ec2.DeleteKeyPairInput{
-		KeyName: aws.String(keyName),
-	}
-
-	_, err := svc.DeleteKeyPair(deleteKeyPairInput)
-
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 func (i *ec2Instance) Stop(ctx gocontext.Context) error {
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/ec2_provider")
+	//hostName := hostnameFromContext(ctx)
 
 	svc := ec2.New(i.provider.awsSession)
 
@@ -1000,7 +969,11 @@ func (i *ec2Instance) Stop(ctx gocontext.Context) error {
 
 	logger.Info(fmt.Sprintf("Terminated instance %s with hostname %s", *i.instance.InstanceId, *i.instance.PrivateDnsName))
 
-	err = i.provider.deleteKeyPair(*i.tmpKeyName)
+	deleteKeyPairInput := &ec2.DeleteKeyPairInput{
+		KeyName: i.tmpKeyName,
+	}
+
+	_, err = svc.DeleteKeyPair(deleteKeyPairInput)
 
 	if err != nil {
 		return err

@@ -309,7 +309,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 
 	startBooting := time.Now()
 
-	pod, err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Create(podSpec)
+	pod, err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Create(gocontext.TODO(), podSpec, metav1.CreateOptions{})
 
 	if err != nil {
 		return nil, err
@@ -320,7 +320,7 @@ func (p *kubernetesProvider) Start(ctx gocontext.Context, startAttributes *Start
 
 	go func(podName string) {
 		for {
-			runningPod, err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Get(podName, metav1.GetOptions{})
+			runningPod, err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Get(gocontext.TODO(), podName, metav1.GetOptions{})
 			if err != nil {
 				errChan <- err
 				return
@@ -366,7 +366,12 @@ func (p *kubernetesProvider) Setup(ctx gocontext.Context) error {
 
 	logger := context.LoggerFromContext(ctx).WithField("self", "backend/kubernetes_provider")
 	if p.dockerRegistryUser != "" && p.dockerRegistryPassword != "" {
-		secret, err := createDockerRegistrySecret(p.kubernetesNamespace, p.dockerRegistryHost, p.dockerRegistryUser, p.dockerRegistryPassword, p.dockerRegistryUser)
+		secret, err := createDockerRegistrySecret(
+			p.kubernetesNamespace,
+			p.dockerRegistryHost,
+			p.dockerRegistryUser,
+			p.dockerRegistryPassword,
+			p.dockerRegistryUser)
 
 		if err != nil {
 			logger.WithField("err", err).Error("Unable to manage auth for docker registry")
@@ -379,15 +384,26 @@ func (p *kubernetesProvider) Setup(ctx gocontext.Context) error {
 }
 
 func (p *kubernetesProvider) upsertSecret(secret *apiv1.Secret) error {
-	existingSecret, err := p.clientSet.CoreV1().Secrets(p.kubernetesNamespace).Get(defaultDockerCfgSecretName, metav1.GetOptions{})
+	existingSecret, err := p.clientSet.CoreV1().Secrets(p.kubernetesNamespace).Get(
+		gocontext.TODO(),
+		defaultDockerCfgSecretName,
+		metav1.GetOptions{})
 
 	if err != nil {
-		_, err = p.clientSet.CoreV1().Secrets(p.kubernetesNamespace).Create(secret)
+		_, err = p.clientSet.CoreV1().Secrets(p.kubernetesNamespace).Create(
+			gocontext.TODO(),
+			secret,
+			metav1.CreateOptions{},
+		)
 		return err
 	}
 
 	if !reflect.DeepEqual(existingSecret.Data, secret.Data) {
-		_, err = p.clientSet.CoreV1().Secrets(p.kubernetesNamespace).Update(secret)
+		_, err = p.clientSet.CoreV1().Secrets(p.kubernetesNamespace).Update(
+			gocontext.TODO(),
+			secret,
+			metav1.UpdateOptions{},
+		)
 	} else {
 
 	}
@@ -575,7 +591,7 @@ func (p *kubernetesProvider) deletePod(hostname string) error {
 	deletePolicy := metav1.DeletePropagationForeground
 	gracePeriod := int64(defaultKubernetesPodTermGrace)
 
-	err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Delete(hostname, &metav1.DeleteOptions{
+	err := p.clientSet.CoreV1().Pods(p.kubernetesNamespace).Delete(gocontext.TODO(), hostname, metav1.DeleteOptions{
 		PropagationPolicy:  &deletePolicy,
 		GracePeriodSeconds: &gracePeriod,
 	})

@@ -35,7 +35,8 @@ var (
 
 	defaultHostname, _ = os.Hostname()
 	defaultLanguage    = "default"
-	defaultDist        = "trusty"
+	defaultDist        = "xenial"
+	defaultArch        = "amd64"
 	defaultGroup       = "stable"
 	defaultOS          = "linux"
 
@@ -133,6 +134,10 @@ var (
 		NewConfigDef("DefaultDist", &cli.StringFlag{
 			Value: defaultDist,
 			Usage: "Default \"dist\" value for each job",
+		}),
+		NewConfigDef("DefaultArch", &cli.StringFlag{
+			Value: defaultArch,
+			Usage: "Default \"arch\" value for each job",
 		}),
 		NewConfigDef("DefaultGroup", &cli.StringFlag{
 			Value: defaultGroup,
@@ -240,6 +245,9 @@ var (
 		}),
 		NewConfigDef("list-backend-providers", &cli.BoolFlag{
 			Usage: "echo backend provider list and exit",
+		}),
+		NewConfigDef("update-images", &cli.BoolFlag{
+			Usage: "update images for LXD backend from job-board",
 		}),
 		NewConfigDef("debug", &cli.BoolFlag{
 			Usage: "set log level to debug",
@@ -381,6 +389,7 @@ type Config struct {
 	Hostname             string        `config:"hostname"`
 	DefaultLanguage      string        `config:"default-language"`
 	DefaultDist          string        `config:"default-dist"`
+	DefaultArch          string        `config:"default-arch"`
 	DefaultGroup         string        `config:"default-group"`
 	DefaultOS            string        `config:"default-os"`
 	JobBoardURL          string        `config:"job-board-url"`

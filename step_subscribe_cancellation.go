@@ -14,12 +14,12 @@ type stepSubscribeCancellation struct {
 func (s *stepSubscribeCancellation) Run(state multistep.StateBag) multistep.StepAction {
 	ctx := state.Get("ctx").(gocontext.Context)
 
-	ctx, span := trace.StartSpan(ctx, "SubscribeCancellation.Run")
+	_, span := trace.StartSpan(ctx, "SubscribeCancellation.Run")
 	defer span.End()
 
 	if s.cancellationBroadcaster == nil {
-		ch := make(chan struct{})
-		state.Put("cancelChan", (<-chan struct{})(ch))
+		ch := make(chan CancellationCommand)
+		state.Put("cancelChan", (<-chan CancellationCommand)(ch))
 		return multistep.ActionContinue
 	}
 
@@ -37,10 +37,10 @@ func (s *stepSubscribeCancellation) Cleanup(state multistep.StateBag) {
 
 	ctx := state.Get("ctx").(gocontext.Context)
 
-	ctx, span := trace.StartSpan(ctx, "SubscribeCancellation.Cleanup")
+	_, span := trace.StartSpan(ctx, "SubscribeCancellation.Cleanup")
 	defer span.End()
 
 	buildJob := state.Get("buildJob").(Job)
-	ch := state.Get("cancelChan").(<-chan struct{})
+	ch := state.Get("cancelChan").(<-chan CancellationCommand)
 	s.cancellationBroadcaster.Unsubscribe(buildJob.Payload().Job.ID, ch)
 }
