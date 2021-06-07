@@ -70,7 +70,7 @@ func init() {
 		"REGION":                   "Which region to run workers in",  // Should be autodetected when running on EC2 instances?
 		"INSTANCE_TYPE":            "Instance type to use for builds", // t2 and t3 are burstable
 		"SUBNET_ID":                "Subnet ID to launch instances into",
-		"SUBNET_IDS":               "Comma separated list of Subnet IDs to launch instances into",
+		"SUBNET_IDS":               "Comma separated list of Subnet IDs to launch instances into for AZ balancing",
 		"EBS_OPTIMIZED":            "Whether or not to use EBS-optimized instances (Default: false)",
 		"IAM_INSTANCE_PROFILE":     "This is not a good idea... for security, builds should provice API keys",
 		"USER_DATA":                "User data, needs to be URL safe base64 encoded format (RFC 4648)",
