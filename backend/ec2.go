@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/url"
 	"regexp"
@@ -69,6 +70,7 @@ func init() {
 		"REGION":                   "Which region to run workers in",  // Should be autodetected when running on EC2 instances?
 		"INSTANCE_TYPE":            "Instance type to use for builds", // t2 and t3 are burstable
 		"SUBNET_ID":                "Subnet ID to launch instances into",
+		"SUBNET_IDS":               "Comma separated list of Subnet IDs to launch instances into for AZ balancing",
 		"EBS_OPTIMIZED":            "Whether or not to use EBS-optimized instances (Default: false)",
 		"IAM_INSTANCE_PROFILE":     "This is not a good idea... for security, builds should provice API keys",
 		"USER_DATA":                "User data, needs to be URL safe base64 encoded format (RFC 4648)",
@@ -107,6 +109,7 @@ type ec2Provider struct {
 	publicIP         bool
 	publicIPConnect  bool
 	subnetID         string
+	subnetIDs        []string
 	keyName          string
 	userData         string
 	customTags       map[string]string
@@ -197,6 +200,11 @@ func newEC2Provider(cfg *config.ProviderConfig) (Provider, error) {
 		subnetID = cfg.Get("SUBNET_ID")
 	}
 
+	subnetIDs := strings.Split(subnetID, ",")
+	if cfg.IsSet("SUBNET_IDS") {
+		subnetIDs = strings.Split(cfg.Get("SUBNET_IDS"), ",")
+	}
+
 	defaultImage := ""
 	if cfg.IsSet("IMAGE_DEFAULT") {
 		defaultImage = cfg.Get("IMAGE_DEFAULT")
@@ -279,6 +287,7 @@ func newEC2Provider(cfg *config.ProviderConfig) (Provider, error) {
 		publicIP:         publicIP,
 		publicIPConnect:  publicIPConnect,
 		subnetID:         subnetID,
+		subnetIDs:        subnetIDs,
 		userData:         userData,
 		keyName:          keyName,
 		customTags:       customTags,
@@ -468,18 +477,23 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 		}
 	}
 
-	if p.subnetID != "" && p.publicIP {
+	rand.Seed(time.Now().Unix())
+	subnetID := p.subnetIDs[rand.Intn(len(p.subnetIDs))]
+
+	logger.Info(fmt.Sprintf("Using subnetID %s", subnetID))
+
+	if subnetID != "" && p.publicIP {
 		runOpts.NetworkInterfaces = []*ec2.InstanceNetworkInterfaceSpecification{
 			{
 				DeviceIndex:              aws.Int64(0),
 				AssociatePublicIpAddress: &p.publicIP,
-				SubnetId:                 aws.String(p.subnetID),
+				SubnetId:                 aws.String(subnetID),
 				Groups:                   securityGroups,
 				DeleteOnTermination:      aws.Bool(true),
 			},
 		}
 	} else {
-		runOpts.SubnetId = aws.String(p.subnetID)
+		runOpts.SubnetId = aws.String(subnetID)
 		runOpts.SecurityGroupIds = securityGroups
 	}
 
@@ -518,7 +532,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 				if p.publicIPConnect {
 					if instance.PublicIpAddress != nil {
 						address = *instance.PublicIpAddress
-					}else{
+					} else {
 						address = ""
 					}
 				}
@@ -528,7 +542,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 					if lastErr == nil {
 						instanceChan <- instance
 						return
-					}else{
+					} else {
 						context.LoggerFromContext(ctx).WithFields(logrus.Fields{
 							"err":  lastErr,
 							"self": "backend/ec2_instance",
