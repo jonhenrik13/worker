@@ -523,30 +523,36 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 
 			instances, lastErr = svc.DescribeInstances(describeInstancesInput)
 
-			if instances != nil &&
-				len(instances.Reservations) > 0 &&
-				instances.Reservations[0] != nil &&
-				len(instances.Reservations[0].Instances) > 0 {
-				instance := instances.Reservations[0].Instances[0]
-				address := *instance.PrivateIpAddress
-				if p.publicIPConnect {
-					if instance.PublicIpAddress != nil {
-						address = *instance.PublicIpAddress
-					} else {
-						address = ""
+			if lastErr != nil {
+				//Unlikely, but can happen when API request limits are reached, for example.
+				logger.WithError(err).Warn("Could not describe instance. Will retry")
+			} else {
+				if instances != nil &&
+					len(instances.Reservations) > 0 &&
+					instances.Reservations[0] != nil &&
+					len(instances.Reservations[0].Instances) > 0 &&
+					instances.Reservations[0].Instances[0].PrivateIpAddress != nil { //There's a change the instance has been provisioned but not acquired network yet
+					instance := instances.Reservations[0].Instances[0]
+					address := *instance.PrivateIpAddress
+					if p.publicIPConnect {
+						if instance.PublicIpAddress != nil {
+							address = *instance.PublicIpAddress
+						} else {
+							address = ""
+						}
 					}
-				}
-				if address != "" {
-					_, lastErr = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", address, 22), 1*time.Second)
+					if address != "" {
+						_, lastErr = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", address, 22), 1*time.Second)
 
-					if lastErr == nil {
-						instanceChan <- instance
-						return
-					} else {
-						context.LoggerFromContext(ctx).WithFields(logrus.Fields{
-							"err":  lastErr,
-							"self": "backend/ec2_instance",
-						}).Debug("Retrying upload of script")
+						if lastErr == nil {
+							instanceChan <- instance
+							return
+						} else {
+							context.LoggerFromContext(ctx).WithFields(logrus.Fields{
+								"err":  lastErr,
+								"self": "backend/ec2_instance",
+							}).Debug("Retrying upload of script")
+						}
 					}
 				}
 			}
