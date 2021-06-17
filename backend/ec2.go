@@ -525,7 +525,7 @@ func (p *ec2Provider) Start(ctx gocontext.Context, startAttributes *StartAttribu
 
 			if lastErr != nil {
 				//Unlikely, but can happen when API request limits are reached, for example.
-				logger.WithError(err).Warn("Could not describe instance. Will retry")
+				logger.WithError(lastErr).Warn("Could not describe instance. Will retry")
 			} else {
 				if instances != nil &&
 					len(instances.Reservations) > 0 &&
